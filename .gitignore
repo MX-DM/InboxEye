@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+build/
+coverage/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Claude Code - local
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Internal development notes
+PROMPTS.md
+README_START_HERE.md
+
+# Editor / OS
+.vscode/
+.DS_Store

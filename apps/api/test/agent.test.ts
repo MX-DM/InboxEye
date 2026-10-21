@@ -1,0 +1,206 @@
+import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
+import { companyConfig } from "../src/company/config.js";
+import { EMAILS } from "../src/company/emails.js";
+import { createGuardedAgent } from "../src/core/AgentRunner.js";
+import { StubInspector, type ContentInspector } from "../src/core/inspector.js";
+import type { LLMClient, LLMRequest, LLMResponse } from "../src/core/llm.js";
+import { RunStore } from "../src/core/RunStore.js";
+import type { GuardConfig, ToolDef } from "../src/core/types.js";
+import { createApp } from "../src/http/routes.js";
+
+const usage = { input: 10, output: 5 };
+
+const toolUse = (name: string, input: unknown, id = "tu_1"): LLMResponse => ({
+  content: [{ type: "tool_use", id, name, input } as never],
+  stopReason: "tool_use",
+  usage,
+});
+const finalText = (text: string): LLMResponse => ({
+  content: [{ type: "text", text } as never],
+  stopReason: "end_turn",
+  usage,
+});
+
+/** LLM falso con respuestas guionadas; guarda una copia de cada request. */
+class MockLLM implements LLMClient {
+  calls: LLMRequest[] = [];
+  constructor(private script: LLMResponse[]) {}
+  async complete(req: LLMRequest): Promise<LLMResponse> {
+    this.calls.push(structuredClone(req));
+    const next = this.script.shift();
+    if (!next) throw new Error("script exhausted");
+    return next;
+  }
+}
+
+function setup(script: LLMResponse[], opts: { inspector?: ContentInspector; config?: GuardConfig } = {}) {
+  const llm = new MockLLM(script);
+  const store = new RunStore();
+  const agent = createGuardedAgent({
+    config: opts.config ?? companyConfig,
+    llm,
+    inspector: opts.inspector ?? new StubInspector(),
+    store,
+  });
+  return { llm, store, agent };
+}
+
+describe("AgentRunner", () => {
+  it("camino feliz: el agente elige readEmail, recibe el contenido y termina", async () => {
+    const { agent, llm } = setup([
+      toolUse("readEmail", { emailId: "email-001" }),
+      finalText("Informativo, prioridad baja."),
+    ]);
+    const { run, done } = agent.start("email-001");
+    await done;
+
+    expect(run.status).toBe("PROCESSED");
+    expect(run.summary).toContain("Informativo");
+    expect(run.events.map((e) => e.eventType)).toEqual([
+      "RUN_STARTED",
+      "LLM_CALL",
+      "TOOL_PROPOSED",
+      "POLICY_DECISION",
+      "TOOL_EXECUTED",
+      "INSPECTION",
+      "LLM_CALL",
+      "RUN_FINISHED",
+    ]);
+    // El segundo request lleva el cuerpo marcado como no confiable.
+    const lastUser = llm.calls[1]!.messages.at(-1)!;
+    expect(JSON.stringify(lastUser)).toContain("trust=\\\"untrusted\\\"");
+    expect(run.tokens).toEqual({ input: 20, output: 10 });
+  });
+
+  it("el primer mensaje al LLM contiene el ID pero NO el cuerpo del correo", async () => {
+    const { agent, llm } = setup([finalText("sin tools")]);
+    await agent.start("email-001").done;
+    const first = JSON.stringify(llm.calls[0]!.messages);
+    expect(first).toContain("email-001");
+    for (const e of EMAILS) {
+      expect(first).not.toContain(e.textBody);
+      expect(first).not.toContain(e.subject);
+    }
+  });
+
+  it("herramienta desconocida: DENY, no se ejecuta y se devuelve tool_result de error", async () => {
+    const { agent, llm } = setup([toolUse("executeShell", { cmd: "rm -rf /" }), finalText("ok")]);
+    const { run, done } = agent.start("email-001");
+    await done;
+
+    expect(run.status).toBe("BLOCKED_ACTION");
+    expect(run.events.some((e) => e.decision === "DENY" && e.tool === "executeShell")).toBe(true);
+    expect(run.events.some((e) => e.eventType === "TOOL_EXECUTED")).toBe(false);
+    const result = (llm.calls[1]!.messages.at(-1)!.content as { is_error?: boolean }[])[0]!;
+    expect(result.is_error).toBe(true);
+  });
+
+  it("readEmail de OTRO email: DENY y el handler nunca se ejecuta", async () => {
+    const handler = vi.fn(async () => ({}));
+    const spyTool: ToolDef = { ...(companyConfig.tools[0] as ToolDef), handler };
+    const { agent } = setup([toolUse("readEmail", { emailId: "email-002" }), finalText("ok")], {
+      config: { ...companyConfig, tools: [spyTool] },
+    });
+    const { run, done } = agent.start("email-001");
+    await done;
+
+    expect(handler).not.toHaveBeenCalled();
+    expect(run.status).toBe("BLOCKED_ACTION");
+    expect(run.events.find((e) => e.decision === "DENY")?.reason).toBe("resource outside run scope");
+  });
+
+  it("input inválido: se rechaza sin ejecutar el handler", async () => {
+    const handler = vi.fn(async () => ({}));
+    const spyTool: ToolDef = { ...(companyConfig.tools[0] as ToolDef), handler };
+    const { agent } = setup([toolUse("readEmail", { emailId: 42 }), finalText("ok")], {
+      config: { ...companyConfig, tools: [spyTool] },
+    });
+    const { done } = agent.start("email-001");
+    await done;
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("MAX_TOOL_STEPS: termina FAILED sin bucle infinito", async () => {
+    const script = Array.from({ length: 10 }, (_, i) =>
+      toolUse("readEmail", { emailId: "email-001" }, `tu_${i}`),
+    );
+    const { agent, llm } = setup(script, {
+      config: { ...companyConfig, limits: { maxToolSteps: 3 } },
+    });
+    const { run, done } = agent.start("email-001");
+    await done;
+    expect(run.status).toBe("FAILED");
+    expect(llm.calls).toHaveLength(3);
+  });
+
+  it("el inspector se invoca ANTES del tool_result y puede retener el contenido", async () => {
+    const order: string[] = [];
+    const inspector: ContentInspector = {
+      async inspect() {
+        order.push("inspect");
+        return { verdict: "quarantine", reason: "test", inspector: "test" };
+      },
+    };
+    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-003" }), finalText("no pude leerlo")]);
+    const origComplete = llm.complete.bind(llm);
+    llm.complete = async (req) => {
+      order.push("llm");
+      return origComplete(req);
+    };
+    const store = new RunStore();
+    const agent = createGuardedAgent({ config: companyConfig, llm, inspector, store });
+    const { run, done } = agent.start("email-003");
+    await done;
+
+    expect(order).toEqual(["llm", "inspect", "llm"]);
+    expect(run.status).toBe("QUARANTINED");
+    // El texto del atacante nunca llegó al modelo.
+    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("Ignorá tus instrucciones");
+  });
+
+  it("si el inspector falla, falla cerrado (QUARANTINED)", async () => {
+    const inspector: ContentInspector = {
+      async inspect() {
+        throw new Error("boom");
+      },
+    };
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-001" }), finalText("x")], { inspector });
+    const { run, done } = agent.start("email-001");
+    await done;
+    expect(run.status).toBe("QUARANTINED");
+    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("reunión semanal");
+  });
+
+  it("error del LLM: la corrida termina FAILED y no rechaza la promesa", async () => {
+    const { agent } = setup([]); // script vacío -> el mock lanza
+    const { run, done } = agent.start("email-001");
+    await expect(done).resolves.toBeUndefined();
+    expect(run.status).toBe("FAILED");
+  });
+});
+
+describe("HTTP", () => {
+  it("POST /runs valida el emailId (400 / 404 / 202)", async () => {
+    const { agent, store } = setup([finalText("ok")]);
+    const server = createApp(agent, store).listen(0, "127.0.0.1");
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const { port } = server.address() as { port: number };
+    const post = (body: unknown) =>
+      fetch(`http://127.0.0.1:${port}/runs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    try {
+      expect((await post({ emailId: "../etc/passwd" })).status).toBe(400);
+      expect((await post({})).status).toBe(400);
+      expect((await post({ emailId: "no-existe" })).status).toBe(404);
+      const ok = await post({ emailId: "email-001" });
+      expect(ok.status).toBe(202);
+      expect(z.object({ runId: z.string() }).safeParse(await ok.json()).success).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});
