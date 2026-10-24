@@ -1,91 +1,57 @@
-# InboxEye — plan de implementación realista (5–6 días efectivos)
+# InboxEye — plan incremental orientado a terminar la demo (v6, 23/10)
 
-## Principio de ejecución
-Primero un **vertical slice funcional**: «elegir correo → Claude solicita una tool → harness la ejecuta → devuelve resultado → dashboard registra». Luego integrar protecciones sin perder un sistema demostrable. **Cada día termina con algo ejecutable y verificado.** El 29/10 hay parcial; no usarlo como día crítico de programación.
+## Punto de partida VERIFICADO POR REVISIÓN DE CÓDIGO
+El backend ya contiene `AgentRunner`, Anthropic `LLMClient`, `PolicyEngine`, `RunStore`, `readEmail`, 3 fixtures, endpoints `POST/GET /runs` y tests escritos. `PROJECT_STATUS.md` registra 10 tests pasando y una llamada real en el incremento 1 (20/10), **no repetidos aún por esta revisión**. No hay frontend, clasificador real ni herramientas adicionales. No reiniciar todo.
 
-> Las siguientes duraciones son bloques de trabajo, no fechas obligatorias ni promesas. Si aparecen bloqueos, recortar por prioridad y terminar el MVP antes del examen.
+## Incremento 0 — auditoría y plan de migración [breve, SIN CODIFICAR]
+- Leer docs v6, `PROJECT_STATUS.md` y los fuentes actuales.
+- Identificar mínimo diff reutilizable, dependencias y trade-offs; no introducir refactor de framework o multiempresa.
+- Confirmar tipos definitivos para `AgentReport`, `ProcessingResult` y orden de incrementos.
+- Output: lista de archivos por cambiar y plan de tests; **esperar aprobación** antes de editar código.
 
-## Día 0 — Aprobación del diseño / preparación (breve)
-- Revisar estos documentos; validar supuestos con el mentor cuando corresponda (API habilitada para app, alcance aceptable).
-- Crear repo Git local privado si se desea, `.gitignore`, `.env.example` sin secretos; preparar variable de entorno local ANTHROPIC_API_KEY solo en backend.
-- Confirmar en una prueba **mínima** que la API y el identificador del modelo configurado funcionan. No repetir llamadas exploratorias.
-- Definir qué herramientas/escenarios mínimo vamos a demostrar y criterios de éxito.
+## Incremento 1 — resultados útiles y autonomía demostrable [P0]
+- Reutilizar runner; cambiar fixtures a NovaShop con órdenes/documentos y objetivo claro.
+- Añadir `getOrderStatus`, `readInternalDocument`, `tagEmail`, `flagForReview`; políticas por correo/documento/tipo.
+- Modelo principal decide llamadas, devuelve `AgentReport` JSON parseado y validado al finalizar. El harness crea `ProcessingResult` con estado, eventos y security desconocido/actual.
+- `POST /runs` y `GET /runs/:id` mantienen compatibilidad; agregar `GET /emails`.
+- Tests con mock: pedido encontrado, inexistente, revisión humana, documento denegado, herramienta inválida; y una corrida real **solo cuando sea explícitamente habilitada**.
+- **Aceptación:** backend resuelve al menos A, C y E con informes útiles y trazas; jamás inventa envíos. Sin frontend todavía aceptable durante el incremento.
 
-## Día 1 — Estructura + vertical slice agent-driven
-**Entregable:** procesar **1 email sintético** desde un endpoint y observar que **Claude decide llamar** a `readEmail(emailId)`.
-- Proyecto Node/TS + Express mínimo; frontend puede ser todavía muy simple.
-- Fixtures de correo en memoria; `POST /runs` con email ID válido.
-- `AgentRunner` con `tool_use`/`tool_result`, `MAX_TOOL_STEPS`, mock `LLMProvider` para tests y *al menos una* prueba real con API.
-- `readEmail` desde repositorio sintético, validación de parámetros y resultados. Registrar línea de tiempo.
-- Definir `AGENT_OBJECTIVE` empresarial; el cuerpo **no** se pasa en contexto inicial.
-**Aceptación:** una corrida real usa al menos una herramienta y termina; correo inválido y tool desconocida se deniegan sin ejecutar.
+## Incremento 2 — Input Guard real [P0]
+- Reemplazar `StubInspector` de servidor con Static Analyzer pequeño + segunda llamada LLM. Mantener stub/test mocks solo en entorno de pruebas, claramente nombrado.
+- Salida estructurada validada: risk, reason, signals; LOW/REVIEW/QUARANTINE; falla cerrada.
+- No abrir GMail ni HTML sofisticado; texto plano suficiente para la demo principal.
+- Tests: seguro admitido, alto bloqueado sin entrega del cuerpo, medio a revisión, excepción/JSON inválido no filtra datos, segundo modelo no ejecuta tools.
+- **Aceptación:** un correo malicioso seleccionado se retiene antes de llegar al agente principal; caso normal sigue funcionando.
 
-## Día 2 — Seguridad de contenido + primeros escenarios
-**Entregable:** `readEmail` vuelve por un pipeline antes de que Claude vea el contenido.
-- `SecurityAnalyzer` como clasificador con llamada separada al LLM y salida validada.
-- Probar varios correos sintéticos; safe → tool_result no confiable; quarantine → contenido no entregado y estado de cuarentena.
-- Registrar por qué se clasificó. Política segura si el analizador falla.
-- Añadir parseo de `textBody` y base de `htmlBody` si entra en el tiempo; heurística HTML oculto puede posponerse a P1.
-**Aceptación:** tests de flujo prueban que el correo malicioso no alcanza al agente cuando se pone en cuarentena; fallo del scanner no habilita el contenido.
+## Incremento 3 — consola MVP [P0 y primer producto completamente demostrable]
+- `apps/web` React + Vite: inbox, selección individual, `Process Selected`, lista de estados, detalle de email, `AgentReport` / `SecurityReport` / `ExecutionTrace` renderizados desde JSON real.
+- Polling sencillo `GET /runs/:id`, sin websockets; mapeo explícito de PENDING/PROCESSING/PROCESSED/NEEDS_REVIEW/QUARANTINED/FAILED.
+- Si tiempo, admitir selección múltiple; por ahora la selección individual completa prevalece.
+- **Aceptación:** A/C/D funcionan desde UI end-to-end y muestran estados correctos, sin logs falsos. Grabar evidencia de funcionamiento.
 
-## Día 3 — Control de acciones + permisos
-**Entregable:** el agente puede proponer acciones posteriores pero no saltarse la autorización.
-- Herramientas sintéticas `lookupRecord`, `createDraft`, `sendEmail` (no real).
-- `PolicyEngine`: deny-by-default, allowlist de herramientas, recursos y destinos, permisos por corrida; validación de args.
-- Documentar por qué el LLM no decide los permisos. Eventos `ALLOW`, `DENY`, `BLOCKED_ACTION`.
-- Tests: rechazo de tool desconocida, registro restringido, destino no autorizado, caso permitido.
-**Aceptación:** intento de acceder a recurso prohibido jamás alcanza a `ToolExecutor` aun si el LLM insiste.
+## Incremento 4 — comparación y cola [P1 con máximo impacto]
+- `UNPROTECTED_DEMO` como modo aislado, deshabilita Input Guard y reglas empresariales de recursos, pero sigue con tools solo sintéticas, validación, límites y auditoría.
+- `Compare Security` ejecuta mismo email por separado sobre datos clonados; UI compara estados, tool calls observados, denegaciones y outcomes.
+- `Process Pending` cola secuencial (en memoria), no requiere Redis ni background workers.
+- **Aceptación:** comparación creíble con dos runs reales y sin filtración de recursos reales. Si no se completa, el MVP del incremento 3 sigue siendo presentable.
 
-## Día 4 — Human-in-the-loop + Acción semántica selectiva
-**Entregable:** el dashboard/endpoint muestran una operación sensible en `PENDING_APPROVAL` antes de ejecutarla.
-- Estado pendiente unido a `runId`, `toolCallId`, acción y args; aprobar/rechazar contra ese snapshot y revalidar al ejecutar.
-- `sendEmail` solo simulado. Test de aprobación única, rechazo, cambio de args e intentos duplicados.
-- **Si P0 está estable**: `ActionEvaluator` con llamada selectiva a Claude para comparar acción vs objetivo confiable. Alinear salida `aligned/misaligned/uncertain` a decisiones conservadoras. No autoriza por sí solo.
-**Aceptación:** ninguna solicitud pendiente se ejecuta sin aprobación exacta; semántica opcional no elimina controles duros.
+## Incremento 5 — estabilizar para la presentación [NO NEGOCIABLE]
+- Ejercitar 3 escenarios y tests deterministas; verificar instalación, build, start y errores de API.
+- Guardar 1–2 replays reales etiquetados para contingencia, si añade robustez.
+- Preparar demo corta, explicar límites y anomalías, actualizar README y `PROJECT_STATUS.md` con lo realmente probado.
+- **Cero funcionalidad nueva el 29/10** salvo bug crítico; conservar tiempo para examen y exposición.
 
-## Día 5 — UI, pruebas y demo
-**Entregable:** un flujo completo por UI con estados y evidencias.
-- Inbox React con lista de 8–12 correos, seleccionar uno o lote, procesar secuencialmente, detalles y resultados.
-- Timeline por correo con tool calls, decisiones y hallazgos; interfaz de aprobar/rechazar.
-- Casos para demo: normal, injection detectado, intento bloqueado, operación legítima pendiente y aprobada/rechazada.
-- Tests de integración con mocks (sin pagar tokens), y 3–5 pruebas reales **controladas**. Registrar resultados *reales*.
-- README con cómo arrancar, variables, comandos, amenazas, limitaciones y demo script de 3–5 minutos.
-**Aceptación:** recorrido de demo se puede ejecutar completo sin intervención manual en consola; hay salida clara para cada mensaje.
+## Prioridad de recorte
+1. Recortar animaciones, HTML avanzado, configuración, métricas, real-time, infraestructura.
+2. Luego pulido de comparación y batch; conservar visualización de trazas reales para un email.
+3. Nunca sacrificar para la demo final: **agente real + Input Guard real + Action Guard determinista + informe JSON + UI mínima**.
+4. No agregar `createDraft`, Action Evaluator, envío simulado/aprobación de envíos ni plugins de tools antes de completar 1–5.
 
-## Día 6 (solo si existe margen) — Pulido y extras
-- HTML oculto y comparación de fuente vs texto extraído.
-- Action Evaluator si no entró antes.
-- Comparación básica scanner on/off **solo con herramientas simuladas**, y métricas sobre fixtures etiquetados (si alcanzan y realmente se ejecutaron).
-- Mejora UX, revisión de seguridad y presentación. **No** agregar producción o integraciones externas.
-
-## Orden de recorte si falta tiempo o crédito
-1. **Eliminar primero:** animaciones, componentes visuales ornamentales, despliegue, Docker, métricas sofisticadas, procesado paralelo, WebSocket.
-2. Luego: HTML oculto complejo (mantener text/plain y parsing básico si ya existe), comparación A/B, gráficos avanzados.
-3. Luego: Action Evaluator semántico (mantener **PolicyEngine** determinista y aprobación humana; explicar claramente el recorte).
-4. **No recortar:** agente real que selecciona herramientas, interceptación obligatoria del `readEmail`, scanner LLM real, política de autorización, herramienta sensible simulada, al menos una revisión humana, trazas y tests básicos.
-
-## Calidad / definición de terminado (Definition of Done)
-- Compila y se ejecuta localmente con comandos documentados.
-- No hay credenciales en git, UI, logs o prompts; `.env.example` contiene placeholders.
-- Un `emailId` no da acceso a otro correo sin autorización; herramientas desconocidas no se ejecutan.
-- La lectura de emails pasa por scanner **antes** del tool_result al modelo principal.
-- **Todos** los `tool_use` pasan por validación + PolicyEngine. No hay rutas alternativas abiertas.
-- El LLM de clasificación puede fallar sin que eso se interprete como autorización.
-- Acciones sensibles simuladas requieren aprobación exacta; rechazadas nunca se ejecutan.
-- Los tests reportados fueron corridos realmente. Se distingue explícitamente tests con mocks de evaluaciones con Claude.
-- UI informa estados reales; no utilizar resultados hardcodeados presentándolos como inferencia del agente.
-- Presentación reconoce limitaciones del prototipo.
-
-## Presupuesto de API y desarrollo
-- Tratar los USD 20 como **presupuesto operativo**, no como «suscripción» ni límite garantizado.
-- Bajar coste con Haiku para tareas acotadas; Sonnet para plan, harness, seguridad delicada y bugs difíciles.
-- Tests normales con `MockLLMProvider` y respuestas fixtures; llamadas reales limitadas y agrupadas por objetivo.
-- Registrar manualmente gasto aproximado al terminar cada sesión (comando `/cost` u otro mecanismo disponible y consola del proveedor, si se tiene acceso); no inventar el saldo.
-- Evitar reexplicar todo a Claude Code en cada prompt, contextos enormes, prompts que lo hagan leer el repo entero constantemente o subagentes múltiples.
-- Limitar en runtime: max pasos de agente, retries, tokens/respuestas y tamaño de emails.
-
-## Preguntas de diseño para validar una sola vez
-- ¿Cuáles son las 3–4 tools mínimas para que la demo sea convincente?
-- ¿Cómo suspendemos una operación aprobable sin corromper el ciclo `tool_use`/`tool_result` de Claude? Si no cabe reanudación completa, pausar y registrar aprobación/ejecución independiente es válido para MVP.
-- ¿Qué comportamiento de cuarentena representa mejor el caso? Preferir no entregar contenido detectado como riesgoso.
-- ¿La clave suministrada permite API desde la aplicación además de Claude Code y qué límites de crédito se aplican?
+## Criterios de trabajo para cada incremento
+- Presentar 3–5 pasos, archivos afectados, tests y gasto esperado.
+- Cambios pequeños y revisables; respetar la organización existente, no reconstruir todo.
+- Correr pruebas normales mock, reportar resultados exactos (no asumir que pasaron).
+- No llamar API real en tests ordinarios; `RUN_REAL_LLM=1` con aprobación para prueba explícita.
+- Documentar lo que falla, decisiones, fecha y siguiente bloque en `PROJECT_STATUS.md`.
+- Nunca leer `.env`/keys para inspección: solo comprobar presencia sin imprimir su valor.

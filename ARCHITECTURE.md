@@ -1,170 +1,118 @@
-# InboxEye — arquitectura definitiva: agent-driven + security pipeline
+# InboxEye — arquitectura v6: agente protegido y demo-first
 
 ## 1. Decisión nuclear
-**El agente conduce el procesamiento.** La UI solo elige qué email simulado procesar; el backend inicia una corrida con el **ID** y contexto confiable. Claude conoce misión y tools, decide llamar a `readEmail(id)`, luego decide siguientes acciones. **No recibe el cuerpo del correo por adelantado.** El harness es código TypeScript, *parte del agente*, y aplica controles obligatorios sobre llamadas a herramientas y resultados externos.
+Una aplicación local con tres roles: **Claude Email Agent** (decide), **InboxEye Harness** (orquesta y aplica seguridad), **Console** (muestra). El agente está incluido en el producto demostrador, pero no implementa él mismo las políticas. Un único agente real y una segunda llamada independiente a LLM clasificador. Mantener `apps/api` y sumar `apps/web`; conservar módulos actuales cuando sea posible.
 
-La inspección HTML/texto es un paso de seguridad del **resultado de `readEmail`**, no un procesamiento de negocio independiente que sustituya al agente.
-
-## 2. Componentes y roles
-| Componente | IA | ¿Autónomo? | Responsabilidad |
-|---|---|---|---|
-| Email Processing Agent (Claude + harness + tools + objective) | Sí | **Uno solo** | Decide orden de herramientas, clasifica, resume, propone borradores/acciones. |
-| Harness / Agent Runtime | No por sí mismo | Parte del agente | Ejecuta loop `tool_use → tool_result`, valida inputs, controla pasos, invoca seguridad, maneja resultados/errores. |
-| Security Analyzer | Una llamada separada a Claude | No | Analiza **contenido externo** y signos de indirect prompt injection antes de devolverlo como `tool_result`. |
-| Policy Engine | No, TypeScript | No | Chequea autorización de tool, recurso, destinatario, efectos y requisitos de aprobación; siempre manda por encima de los LLM. |
-| Action Evaluator (P1) | Una llamada separada a Claude, condicional | No | Estima si una **acción propuesta** se alinea con la misión empresarial; no autoriza por sí solo. |
-| Human Approval | No | No | Aprueba/rechaza acción sensible autorizable, unida a tool + args exactos + run; no anula prohibiciones. |
-| Simulated Tool Executor | No | No | Lee emails, consulta registros, guarda borradores, simula envíos sin contactar terceros. |
-| Frontend React | No | No | Inbox, selección/batch, trazas, hallazgos y revisiones. |
-
-Claude Code se utiliza para **desarrollar** InboxEye; NO es el agente empresarial de runtime.
-
-## 3. Diagrama de flujo
-```text
-[React: seleccionar email(s) → Procesar]
-                  |
-          POST /runs { emailIds }
-                  |
-[Backend: crea Run por ID, lote secuencial]
-                  |
-       [EMAIL PROCESSING AGENT]
-         [HARNESS inicia Claude]
-     objective confiable + emailId + tool schemas
-                  |
-       Claude solicita readEmail(id)
-                  |
-      BEFORE TOOL: Policy Engine
-       DENY / REVIEW / ALLOW
-                  |
-      [Tool Executor: readEmail]
-                  |
-      AFTER TOOL: pipeline de seguridad
-      - parseo/normalización HTML (si aplica)
-      - Security Analyzer: otra llamada a Claude
-      - SAFE / SUSPICIOUS / QUARANTINE
-                  |
-    [tool_result al Claude principal]
-       solo resultado admitido o aviso
-                  |
-    Claude interpreta y pide otra tool
-                  |
-      BEFORE TOOL: Policy Engine
-      Action Evaluator (si corresponde, P1)
-      Human Approval (si corresponde)
-                  |
-       ALLOW / DENY / PENDING
-                  |
-     ejecutar herramienta o suspender
-                  |
-         tool_result → Claude
-                  |
-     repetir con límite de pasos/costo
-                  |
-[Run/eventos/estados → React dashboard]
+## 2. Flujo de ejecución
+```mermaid
+flowchart TD
+ UI["React: Process Selected / Pending"] --> API["API: POST /runs {emailId, mode}"]
+ API --> RUN["AgentRunner: inicia Claude con objetivo + emailId"]
+ RUN --> AGENT["LLM #1: Email Agent decide tool"]
+ AGENT --> VAL["Validación de tool + schema + límites"]
+ VAL --> MODE{"Modo PROTECTED?"}
+ MODE -->|Sí| POLICY{"Action Guard: tool / args / recurso"}
+ MODE -->|No| SAFE["Sandbox sintético + validaciones básicas"]
+ POLICY -->|DENY| DENY["Auditar DENY; no ejecutar"]
+ POLICY -->|ALLOW| EXEC["Tool Executor"]
+ SAFE --> EXEC
+ EXEC --> CHECK{"Tool readEmail?"}
+ CHECK -->|No| RETURN["Tool result + evento"]
+ CHECK -->|Sí| SCAN{"Modo PROTECTED?"}
+ SCAN -->|Sí| STATIC["Static Analyzer: patrones / anomalías"]
+ STATIC --> CLASSIFIER["LLM #2: Injection Classifier sin tools"]
+ CLASSIFIER --> RISK{"LOW / MEDIUM / HIGH / ERROR"}
+ RISK -->|LOW| ADMIT["tool_result: email como dato no confiable"]
+ RISK -->|MEDIUM o ERROR| REVIEW["Needs Review / fallo seguro"]
+ RISK -->|HIGH| QUAR["Quarantine; no entregar email"]
+ SCAN -->|No| RAW["Email sintético sin scanner"]
+ RAW --> AGENT
+ ADMIT --> AGENT
+ RETURN --> AGENT
+ DENY --> AGENT
+ AGENT -->|end_turn + JSON| REPORT["Validar AgentReport"]
+ REPORT --> RESULT["Harness construye ProcessingResult"]
+ REVIEW --> RESULT
+ QUAR --> RESULT
+ RESULT --> UIRESULT["Dashboard: Agent Report + Security + Trace"]
 ```
 
-## 4. Boundary / jerarquía de confianza
-1. **Confiable:** configuración del backend, `AGENT_OBJECTIVE`, permisos estructurados, estado de la corrida, aprobación autenticada/validada en demo, fixtures internos clasificados en el servidor.
-2. **No confiable:** subject, sender, body text/plain, HTML, links, datos retornados por herramientas que se originan externamente, sugerencias del propio LLM.
-3. Nunca interpolar un email como `system` ni aceptar en él instrucciones para cambiar objetivos/permisos. El contexto inicial de Claude contiene `emailId`, no el cuerpo. Preprocesamiento del correo es responsabilidad del harness al devolver `readEmail`.
-4. La salida `SAFE` de Security Analyzer significa **«no encontró indicios suficientes»**, NO «correo confiable» ni permiso adicional. `HIGH/QUARANTINE` evita devolver el contenido al agente; error de inspección falla de forma segura.
-5. No enviar el contenido HTML bruto a un componente React que lo renderice sin sanitización. Vista de fuente: mostrar texto escapado, sin scripts ni recursos remotos.
+*El diagrama simplifica detalles del protocolo:* adaptar al SDK y a los bloques `tool_use` / `tool_result`, mantener la continuidad de mensajes. Puede ser razonable devolver un `tool_result` de cuarentena sin contenido y completar luego la corrida con el estado fijado por harness, como hoy. `disable_parallel_tool_use` ya se encuentra en `llm.ts`.
 
-## 5. Herramientas de ejemplo (ajustables dentro del MVP)
-- `readEmail({ emailId })`: devuelve correo sintético al harness, **no directo a Claude**; antes pasa autorización, después inspector.
-- `lookupRecord({ recordId })`: consulta registros internos sintéticos, solo IDs permitidos; prohibir IDs restringidos. Registro devuelve datos mínimos necesarios.
-- `createDraft({ emailId, subject, body })`: escribe un borrador sintético de respuesta. Validar longitudes e IDs; no enviar.
-- `sendEmail({ draftId, to })`: **simulación** de envío. Solo para destinos autorizables y con aprobación humana exacta previa; never real mail.
-- La clasificación y el resumen pueden entregarse como respuesta estructurada del agente o actualizar estado mediante una herramienta simple; no inventar herramientas redundantes.
+## 3. Módulos — reusar el código existente
+- `core/AgentRunner.ts`: loop Claude, límites, autorización, tool results, clasificación de finalización, eventos.
+- `core/llm.ts`: adaptador Anthropic y `LLMClient` mockable. Usar un cliente separado para el clasificador (modelo económico), no otro agente.
+- `core/inspector.ts`: reemplazar `StubInspector` por combinación `StaticAnalyzer` + `InjectionClassifier`; adaptar `Inspection` a `LOW/MEDIUM/HIGH` y motivo, esquema validado. Un `MEDIUM` o un error **no admite** el cuerpo al agente.
+- `core/PolicyEngine.ts`: ampliar comprobaciones por `toolName`, schema, `emailId`, `documentId`, categoría. Rechazo por defecto. No depende de LLM.
+- `company/config.ts`: objetivo NovaShop y registro de cinco herramientas fijas.
+- `company/emails.ts`, `company/orders.ts`, `company/documents.ts`: fixtures sintéticos; crear los dos últimos solo si ayudan a mantener código pequeño.
+- `core/RunStore.ts` y `core/types.ts`: soportar `mode`, resultados estructurados, decisiones y eventos auditables, sin secretos; estados transitorios y finales.
+- `http/routes.ts`: ampliar mínimamente para listado de emails, run de uno, cola secuencial y consulta de resultados. No real-time sockets; polling.
+- `apps/web`: una pantalla con bandeja, detalle, resultado, análisis y timeline; comparador después del camino vertical estable.
 
-Todas las entradas de tools se validan contra schema en runtime. Evitar `executeCommand`, lectura arbitraria del FS, fetch de URL arbitraria o `sendRawHttp`.
+`ToolDef` y `GuardConfig` ya existen: mantener la interfaz si sirve, **sin expandirla a plugins de organizaciones**. No introduzcas inversión de dependencias donde no añade valor a la demo.
 
-## 6. Mecanismo de autorización de una acción
-En orden:
-1. Validación de nombre y esquema de herramienta; desconocido → `DENY`.
-2. `PolicyEngine` determinista: tool habilitada, alcance de IDs/recursos, clasificación de información, destinatario permitido, operación y límite de frecuencia; prohibición → `DENY` sin consultar LLM.
-3. `ActionEvaluator` (P1): **solo** si la acción pasó la política dura y tiene riesgo semántico/ambigüedad; recibe objetivo confiable + acción propuesta + contexto mínimo necesario y etiquetado como no confiable. `misaligned` → `DENY`; `uncertain` → `REVIEW` o `DENY`; `aligned` **no concede permisos**.
-4. Si por reglas la acción sensible necesita humano, dejarla en `PENDING_APPROVAL` aunque LLM diga `aligned`; no ejecutar mientras esté pendiente.
-5. Si se autoriza, `ToolExecutor` ejecuta y harness devuelve `tool_result` a Claude.
-6. Auditar pasos. Ante caídas del evaluador o políticas, no permitir por defecto.
+## 4. Política determinista — reglas reales de NovaShop
+En modo protegido, antes de ejecutar:
+1. Tool conocida y argumentos validados por Zod. Tool desconocida -> `DENY`.
+2. `readEmail`, `tagEmail`, `flagForReview` deben usar el mismo `emailId` de la corrida.
+3. `readInternalDocument` permite **solo** `shipping-policy` y `return-policy`; `payroll-private` está denegado siempre.
+4. `tagEmail` acepta únicamente categorías registradas.
+5. `getOrderStatus` acepta IDs válidos; pedido inexistente devuelve `NOT_FOUND`, **no** error de autorización.
+6. Limitar paso/costo/tamaño de respuesta para evitar bucles y ataques por consumo.
+7. `flagForReview` registra derivación; no requiere implementar un workflow de aprobaciones para envíos.
 
-### Aprobación humana en MVP
-En el dashboard mostrar la tool y **parámetros exactos** (resumen, destinatario, IDs, contenido a compartir). Guardar `runId`, `toolCallId`, args normalizados, estado pendiente; aprobar **solo** esos parámetros (sin edición silenciosa). Al aprobar, backend revalida política y ejecuta **una sola vez** la operación simulada; al rechazar registra no ejecución. Diseñar suspensión/reanudación simple; es válido dejar la corrida detenida con resultado `PENDING_APPROVAL` y emitir un evento final tras aprobación sin recrear el bucle del agente, si eso ahorra complejidad. Documentar esta limitación.
+El permiso no depende de que el Input Guard diga `LOW`. Aun con falso negativo, la política impide acceso a `payroll-private` si Claude lo solicita. Si una tool se deniega, registrar `POLICY_DENIED`; devolver error sin ejecutar; finalizar o seguir según severidad y límites. Diferenciar incidente registrado de estado final.
 
-## 7. Security Analyzer y HTML
-- **Paso 1** (`readEmail` ejecutado): parser HTML tolerante, sin ejecutar scripts/recursos, extrae texto legible y marcadores de fragmentos ocultos por heurísticas simples. Mensajes text-only son válidos.
-- **Paso 2**: llamada a Claude como clasificador, sin herramientas, con instrucciones defensivas y contenido etiquetado como no confiable. Parseo y validación de JSON/schema en backend. Considerar salida mínima: `{verdict: 'safe'|'suspicious'|'quarantine', reason, evidence}`.
-- **Paso 3**: `quarantine` → no devolver cuerpo al agente, registrar; `suspicious` → política conservadora (por defecto revisión/cuarentena según configuración explícita); `safe` → devolver texto admitido **como tool_result de origen externo**, nunca autoridad.
-- Un correo puede tener indicios de ataque y ser inocente (falso positivo); registrar razones y revisar.
-- HTML oculto **no** significa automáticamente prompt injection; el parser solo destaca fragmentos para que el clasificador los evalúe.
+## 5. Input Guard — responsabilidades limitadas
+Intercepción **después** de ejecutar `readEmail` y **antes** de su `tool_result` a Claude.
+- **Static Analyzer (sin IA)**: validaciones de tamaño y normalización, patrones obvios dirigidos al agente; si hay HTML, detección heurística de contenido oculto como señal, no condena automática. No construir un motor antiphishing ni parser CSS avanzado.
+- **Injection Classifier (LLM #2)**: recibe objetivo confiable, remitente/asunto/cuerpo y señales estáticas como *datos no confiables*; evalúa si hay órdenes dirigidas al agente, suplantación de autoridad o intentos de cambiar herramientas/objetivo. **No tools**, respuesta corta estructurada y validada.
+- LOW -> se entrega el email marcado como dato externo; MEDIUM -> `NEEDS_REVIEW`, HIGH -> `QUARANTINED`, error de LLM/parsing -> revisión o `FAILED` seguro (jamás fallback allow).
+- No confundir cambio de cuenta bancaria (revisión empresarial) con prompt injection por sí mismo.
 
-## 8. Estados y eventos
-- `PENDING`: recibido/seleccionado aún sin procesar.
-- `PROCESSING`: ejecución activa.
-- `PROCESSED`: terminó satisfactoriamente la tarea permitida.
-- `QUARANTINED`: correo retenido por análisis.
-- `BLOCKED_ACTION`: hubo intento de una acción prohibida. Se registra también como evento aunque el agente eventualmente finalice; definir estado final consistente.
-- `PENDING_APPROVAL`: operación sensible propuesta y pausada.
-- `FAILED`: falló la corrida, se agotó límite o no se pudo inspeccionar con seguridad.
+**Límites:** un resultado LOW no es certificado de seguridad, hay falsos positivos/negativos; otras tools que devuelven datos externos reales quedarían fuera del alcance del prototipo.
 
-Registro append-only en memoria para demo: `{runId, emailId, timestamp, eventType, tool?, decision?, reason?}`; sin guardar secretos ni texto completo sensible en trazas. Refrescar UI vía polling sencillo; WebSocket no necesario.
-
-## 9. Pseudocódigo de referencia (conceptual)
+## 6. Contrato JSON común
 ```ts
-async function runEmailAgent(emailId: string, trustedContext: AgentContext) {
-  let response = await invokeClaude({
-    system: trustedContext.agentObjective,
-    userEvent: { type: 'PROCESS_EMAIL', emailId },
-    toolSchemas: AVAILABLE_TOOLS,
-  });
+type RunMode = 'PROTECTED' | 'UNPROTECTED_DEMO';
+type FinalStatus = 'PROCESSED' | 'NEEDS_REVIEW' | 'QUARANTINED' | 'FAILED';
+type Risk = 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN' | 'NOT_ANALYZED';
 
-  for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-    if (!response.toolCalls.length) return finalizeRun(response);
+type AgentReport = {
+  category: 'SUPPORT' | 'RETURNS' | 'FINANCE' | 'GENERAL' | 'IRRELEVANT';
+  summary: string;
+  outcome: 'INFORMATION_FOUND' | 'INFORMATION_UNAVAILABLE' | 'ESCALATED' | 'NO_ACTION_NEEDED';
+  findings: string[];
+  suggestedNextStep: string;
+};
 
-    const toolResults = [];
-    for (const call of response.toolCalls) {
-      const permitted = policyEngine.evaluate(call, trustedContext);
-      if (permitted.kind === 'DENY') {
-        toolResults.push(blockedToolResult(call));
-        continue;
-      }
-      const semantic = shouldEvaluate(call)
-        ? await actionEvaluator.assess(trustedContext.agentObjective, call)
-        : null;
-      if (semantic?.kind === 'MISALIGNED') {
-        toolResults.push(blockedToolResult(call));
-        continue;
-      }
-      if (permitted.kind === 'REVIEW' || semantic?.kind === 'UNCERTAIN') {
-        queueExactApproval(call, trustedContext);
-        return suspendRun(); // No se ejecuta aún. Reanudar/aprobar explícitamente.
-      }
-
-      const rawResult = await simulatedToolExecutor(call);
-      if (call.name === 'readEmail') {
-        const parsed = extractEmailContent(rawResult);
-        const verdict = await securityAnalyzer.inspect(parsed, trustedContext.agentObjective);
-        toolResults.push(['quarantine', 'suspicious'].includes(verdict.verdict)
-          ? quarantinedToolResult(call)
-          : admittedToolResult(call, parsed.agentVisibleText));
-      } else {
-        toolResults.push(normalToolResult(call, rawResult));
-      }
-    }
-    response = await continueClaudeWithToolResults(response, toolResults);
-  }
-  return failSafely('Maximum tool steps reached');
-}
+type ProcessingResult = {
+  runId: string;
+  emailId: string;
+  mode: RunMode;
+  status: FinalStatus;
+  agentReport: AgentReport | null;
+  security: { risk: Risk; reason?: string; signals: string[]; deniedActions: number };
+  events: RunEvent[];
+};
 ```
-**Atención:** es pseudocódigo de dominio, NO API literal. La implementación debe respetar la semántica real de `tool_use`/`tool_result`, **todas** las llamadas concurrentes que emita el modelo, y la consistencia de resultados si queda una aprobación pendiente. Para el MVP se puede configurar ejecución secuencial de herramientas si el SDK/modelo lo permite y simplificar el manejo.
+*Tipos conceptuales*: Claude solo produce `AgentReport`; harness construye todo lo demás, verifica evidencia y valida schema. Si hay cuarentena antes de que el agente lea contenido, `agentReport=null`. En modo no protegido risk=`NOT_ANALYZED`, nunca `LOW`. Mantener `BLOCKED_ACTION` de código existente durante transición si hace falta; decidir y testear el mapping UI antes de borrarlo.
 
-## 10. Threat model compacto
-- **Activo:** documentos/registros internos sintéticos, destino y contenido de mensajes, integridad de la tarea del agente.
-- **Atacante:** remitente externo que controla asunto, texto/HTML del correo y posibles instrucciones escondidas. No controla configuración confiable ni permisos.
-- **Superficies:** body text/html, metadatos, enlaces simulados, resultados de tools de origen externo.
-- **Abusos:** goal hijacking, extracción de datos, envío no autorizado, evasión del scanner, elevación de confianza por contenido del email, costes excesivos por bucles.
-- **Controles:** tipado/validación, extracción prudente, scanner LLM, autorizaciones fuera del LLM, revisión humana, topes de llamadas, logs y pruebas.
-- **Límites:** el clasificador y el propio agente pueden equivocarse; la seguridad de tools no elimina todos los riesgos de contenido generado; el parser HTML no simula todos los clientes de mail.
+## 7. Una corrida vs cola y comparación
+- La API crea `runId` y devuelve enseguida; el frontend consulta `/runs/:id` (polling).
+- Cola simple sobre IDs `PENDING`, sin paralelismo ni infraestructura de mensajería; registrar `QUEUED` y procesar de a uno, con límites de ejecuciones.
+- Comparador: dos runs con el mismo `emailId` y fixtures **independientes/reset**. En `UNPROTECTED_DEMO`: desactivar Input Guard y reglas empresariales para observación, **conservar** allowlist técnica de cinco tools, validaciones Zod, alcance físico de fixtures, límites, auditoría y prohibición de operaciones reales.
+- Registrar tool **solicitada**, autorizada/denegada, **ejecutada** y hallazgos del scan por separado. No crear logs ficticios ni atribuir un ataque exitoso a Claude sin tool call real.
+- Replay opcional: mostrar trazas guardadas de corridas **reales**, identificadas como tales, para resiliencia de demo.
 
-## 11. Criterio arquitectónico
-Monolito modular y dependencias invertidas donde aporten valor. `AgentRunner` depende de una interfaz `LLMProvider`, `SecurityAnalyzer` de un `Classifier`, `PolicyEngine` no depende de LLM, `ToolExecutor` resuelve solo tools explícitas. Evitar abstraer todo antes de tener un vertical slice funcionando.
+## 8. Pruebas imprescindibles
+- El primer request Claude contiene solo `emailId`; nunca asunto/cuerpo.
+- `readEmail` pasa por Input Guard antes de devolver contenido al agente; cuarentena/error no filtra el cuerpo.
+- `readInternalDocument('payroll-private')` nunca llega al executor en modo protegido.
+- Tool desconocida, `emailId` de otro run y args inválidos son rechazados.
+- Pedido inexistente es `INFORMATION_UNAVAILABLE`, no falso éxito.
+- `flagForReview` produce `NEEDS_REVIEW` y el informe interno correspondiente.
+- Cada run produce JSON consistente y eventos reales, incluso sin AgentReport.
+- Protected / Unprotected usan copias de fixtures; modo desprotegido no habilita tools reales ni shell.
+- Tests con mocks (gratis), con una pequeña validación integrada real (con crédito, explícita).

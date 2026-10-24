@@ -1,30 +1,35 @@
-# InboxEye — reglas de trabajo para Claude Code
+# InboxEye — instrucciones operativas para Claude Code (23/10/2026)
 
-> Proyecto individual del Bootcamp Proofpoint. Demo: 30/10/2026. Desarrollo efectivo: ~5–6 días; parcial universitario: 29/10. Créditos de Anthropic asignados: USD 20 **compartidos** entre Claude Code y las llamadas de la aplicación (si la clave habilita ambos usos).
+## Misión y límite
+Showcase individual del Bootcamp Proofpoint, demo 30/10/2026; examen universitario 29/10. Objetivo: **demo local terminada, verificable e impactante** de un agente de correo autónomo protegido por un harness. Presupuesto Anthropic comunicado: USD 20 compartidos entre desarrollo y runtime; confirmar consumo, no asumir límite automático.
 
-## Documentación (no cargarla toda por defecto)
-- `INBOXEYE_CONTEXT.md`: producto, objetivos, alcance y decisiones acordadas. Leer al planificar y ante cambios de requisitos.
-- `ARCHITECTURE.md`: flujo **agent-driven**, herramientas, componentes, límites de confianza y seguridad. Leer antes de modificar agente, harness o seguridad.
-- `IMPLEMENTATION_PLAN.md`: prioridades, secuencia, criterios de aceptación y recortes.
-- `PROJECT_STATUS.md`: fuente de verdad del **estado IMPLEMENTADO**. Consultar antes de cada incremento y actualizar solo con hechos verificados.
-- `PROMPTS.md`: instrucciones de inicio y plantillas de trabajo; no es código de la aplicación.
+**No construir una plataforma extensible**: una empresa sintética (NovaShop), herramientas y datos hardcodeados, un agente Claude y un segundo LLM como clasificador. Monolito sencillo Node/Express/TypeScript, frontend React/Vite, Vitest, Zod; estado en memoria. Reutilizar el primer incremento existente, NO empezar de cero sin motivo técnico probado.
 
-## Reglas innegociables
-1. **Agent-driven**: el frontend inicia una ejecución con ID(s); el harness inicia a Claude con objetivo empresarial y un ID; Claude elige herramientas y secuencia. **No** entregar el cuerpo del correo al modelo antes de la llamada `readEmail`.
-2. El harness es parte del agente, no otro agente. Todas las herramientas definidas por nosotros deben pasar **obligatoriamente** por autorización; los resultados externos de `readEmail` se inspeccionan **antes** de volver al LLM principal.
-3. Los correos (incluidos asunto/remitente/HTML), documentos y resultados de herramientas son **datos no confiables**. No pueden redefinir objetivos, políticas, herramientas ni permisos.
-4. `PolicyEngine` determinista es autoridad para permisos y denegaciones. Dictámenes de LLM (`SecurityAnalyzer` y `ActionEvaluator`) son señales de riesgo, **no autorizaciones**. Operaciones sensibles requieren aprobación humana de la acción exacta cuando la política lo permita. Ante fallos relevantes: no permitir por defecto.
-5. Solo datos sintéticos, herramientas simuladas, envío de mails **simulado**, sin Gmail/Outlook, credenciales corporativas, shell para el agente, rutas libres al filesystem, despliegue público ni envíos reales.
-6. Un backend Node.js/TypeScript modular + frontend React/Vite/TypeScript; evitar microservicios, SDK universal, multiagentes, entrenamiento de modelos y tecnologías innecesarias.
-7. Validar esquemas de herramientas, usar límites de pasos/reintentos/tokens, manejar errores, auditar decisiones sin secretos ni datos sensibles. API Key solo en entorno del backend, jamás en frontend, Git o Markdown. Asegurar `.gitignore` y `.env.example` sin secretos.
-8. Tests deterministas con mocks para seguridad y flujo; evaluaciones LLM reales pequeñas y separadas. No inventar métricas, funcionalidades ni resultados.
+## Documentación y precedencia
+1. `INBOXEYE_CONTEXT.md` — alcance y definición de terminado.
+2. `ARCHITECTURE.md` — límites de confianza, flujo, módulos, contratos y estados.
+3. `DEMO_SCENARIOS.md` — fixtures y resultados observables deseados.
+4. `IMPLEMENTATION_PLAN.md` — secuencia y recortes.
+5. `MIGRATION_NOTES.md` — auditoría del incremento existente y cambios requeridos.
+6. `PROJECT_STATUS.md` — hechos implementados/validados: **preservarlo** y actualizarlo al terminar cada incremento.
+7. `PROMPTS.md` — mensajes de inicio y de trabajo.
 
-## Forma de trabajar
-- **Primera interacción: planificar, no implementar.** Revisar `INBOXEYE_CONTEXT.md`, `ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md` y `PROJECT_STATUS.md`; discutir conflictos o riesgos antes de escribir código.
-- Trabajar **incremento a incremento** con el menor diff posible. Antes de tareas amplias, indicar 3–5 pasos, archivos afectados y cómo se verificará.
-- Implementar siguiendo el plan aprobado, sin introducir cambios de alcance por iniciativa propia. Si hay tensión entre documentos y código, detenerse y explicar.
-- Ejecutar los tests relevantes; informar cuáles pasaron realmente y cuáles no pudieron ejecutarse. No confundir pruebas simuladas con pruebas con LLM real.
-- Al terminar cada incremento: actualizar `PROJECT_STATUS.md` (completado, comandos de verificación, riesgos, siguiente paso), y responder con resumen corto, archivos cambiados y coste de llamadas si es conocido.
-- Mantener explicaciones comprensibles para que el desarrollador pueda defender decisiones de diseño. Priorizar interfaces limpias **sin sobreingeniería**.
-- No hacer commits, pushes, instalaciones globales, despliegues, configuraciones de servicios externos o operaciones destructivas sin autorización explícita.
-- Para conservar créditos: preferir Haiku en cambios acotados y Sonnet en decisiones complejas; evitar subagentes, lectura repetida de documentos largos y consultas a modelos dentro de tests comunes. No asumir que USD 20 es un límite técnico automático.
+Si documentos antiguos contradicen estos, prevalece esta versión de alcance (23/10). No releer todos los MD en cada llamada: usar solo los necesarios.
+
+## Invariantes de arquitectura
+- El frontend dispara `emailId` (o lote) y modo. El AgentRunner inicia Claude con un objetivo confiable + ID + schemas. **No se envía el cuerpo del email inicialmente**.
+- Claude **decide las tools** y su secuencia; es el único agente autónomo. El harness gestiona `tool_use` / `tool_result` y las decisiones obligatorias de seguridad. El clasificador es una **segunda llamada LLM sin tools**, no un segundo agente.
+- Toda tool pasa por verificación de nombre, esquema y política **antes** de ejecutar. `readEmail` pasa además por Input Guard sobre la respuesta **antes** de que Claude vea el contenido.
+- Input Guard protegido = reglas estáticas ligeras + clasificador LLM especializado; LOW admite como dato **no confiable**, MEDIUM deriva a revisión, HIGH cuarentena; fallo de inspección nunca libera el contenido.
+- Action Guard = código determinista, valida correo de la ejecución, ID de documento, herramientas y argumentos autorizados. El juicio de un LLM nunca concede permisos.
+- Salida uniforme `ProcessingResult`: estado y traza generados por harness, `agentReport` estructurado producido por Claude si termina. Si cuarentena previa, `agentReport=null`.
+- Modo `UNPROTECTED_DEMO` únicamente sobre fixtures, sin integraciones ni peligros reales: quita barreras empresariales adicionales para comparar; siempre mantiene sandbox, validación técnica, límites y auditoría.
+- Nunca se envía email real, no se exponen shell, filesystem arbitrario, red externa, secretos ni datos privados al agente. Nunca afirmar que un ataque funcionó si no ocurrió realmente.
+
+## Forma de trabajo — MUY IMPORTANTE
+- **Primera interacción: inspección y plan, sin cambios de código.** Comparar repo con docs v6, detectar componentes reutilizables y proponer el próximo incremento mínimo. No hacer refactor masivo.
+- Cada incremento debe dejar algo que compila, se prueba y puede mostrarse. Antes de programar: objetivo, archivos, criterios de aceptación, plan breve. Después: tests **realmente ejecutados**, diferencias y actualizar `PROJECT_STATUS.md` sin borrar historia.
+- Priorizar el recorrido end-to-end protegido y la UI funcional antes del comparador; la comparación es el gran diferenciador para la demo pero no debe impedir una entrega terminada.
+- Evitar microservicios, Redis, WebSocket, base de datos productiva, SDK universal, configurador de empresas, prompts subagente, generador de drafts (extra) y traducción a framework genérico.
+- **Seguridad de secretos:** nunca leer, imprimir, buscar dentro, copiar a prompts, registrar o mostrar `.env`, `.env.*`, API keys, tokens, variables de entorno sensibles ni contenidos de `.git` buscando secretos. `grep`, `Get-Content`, `cat`, `rg` pueden mostrar claves accidentalmente: hacer verificaciones booleanas/redactadas. No poner secretos en trazas, tests, screenshots, MD o commits.
+- No ejecutar instalaciones globales, commits/push, despliegues, comandos destructivos ni pruebas reales repetitivas con costo sin indicación expresa. Tests normales con mocks; pruebas Anthropic reales pequeñas, explícitas y registradas.
