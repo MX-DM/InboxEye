@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import type { ContentInspector } from "./inspector.js";
 import type { LLMClient } from "./llm.js";
+import { checkEvidence, parseAgentReport, type ExecutedTool } from "./report.js";
 import { PolicyEngine } from "./PolicyEngine.js";
 import { RunStore } from "./RunStore.js";
 import {
@@ -9,6 +10,7 @@ import {
   type GuardConfig,
   type Limits,
   type Run,
+  type RunMode,
   type RunContext,
   type RunStatus,
   type ToolDef,
@@ -46,19 +48,26 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
   const apiTools = config.tools.map(toApiTool);
 
   async function execute(emailId: string, run: Run): Promise<void> {
-    const ctx: RunContext = { runId: run.id, emailId };
+    const ctx: RunContext = { runId: run.id, emailId, effects: run.effects };
     const flags = { blocked: false, quarantined: false };
+    const executed: ExecutedTool[] = [];
+    let reportRetried = false;
     // Solo el ID viaja al modelo: el cuerpo del correo llega únicamente vía readEmail.
     const messages: Anthropic.MessageParam[] = [
       { role: "user", content: `Nuevo email para procesar. emailId: ${emailId}` },
     ];
 
-    const finish = (status: RunStatus, summary?: string, reason?: string) => {
-      store.finish(run, status, summary);
+    const finish = (status: RunStatus, reason?: string) => {
+      store.finish(run, status, status === "FAILED" ? reason : undefined);
       store.append(run, "RUN_FINISHED", { reason, detail: { status } });
     };
+    // Estado de negocio decidido por el harness; Claude solo aporta el AgentReport.
     const finalStatus = (): RunStatus =>
-      flags.quarantined ? "QUARANTINED" : flags.blocked ? "BLOCKED_ACTION" : "PROCESSED";
+      flags.quarantined
+        ? "QUARANTINED"
+        : flags.blocked || run.effects.reviews.length > 0
+          ? "NEEDS_REVIEW"
+          : "PROCESSED";
 
     async function handleToolUse(block: Anthropic.ToolUseBlock): Promise<Anthropic.ToolResultBlockParam> {
       const deny = (reason: string, markBlocked: boolean): Anthropic.ToolResultBlockParam => {
@@ -70,7 +79,7 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
       store.append(run, "TOOL_PROPOSED", { tool: block.name });
 
       const tool = tools.get(block.name);
-      if (!tool) return deny("herramienta no registrada", true);
+      if (!tool) return deny("herramienta no registrada", false);
 
       const parsed = tool.input.safeParse(block.input);
       if (!parsed.success) return deny("argumentos inválidos", false);
@@ -82,6 +91,7 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
       let output: unknown;
       try {
         output = await tool.handler(parsed.data, ctx);
+        executed.push({ tool: block.name, output });
         store.append(run, "TOOL_EXECUTED", { tool: block.name });
       } catch (err) {
         store.append(run, "TOOL_EXECUTED", {
@@ -130,7 +140,7 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
 
     for (let step = 0; step < limits.maxToolSteps; step++) {
       if (run.tokens.input + run.tokens.output > limits.maxTokensPerRun) {
-        return finish("FAILED", undefined, "token budget exceeded");
+        return finish("FAILED", "token budget exceeded");
       }
 
       const res = await llm.complete({
@@ -147,13 +157,35 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
 
       if (res.stopReason !== "tool_use") {
         if (res.stopReason !== "end_turn") {
-          return finish("FAILED", undefined, `unexpected stop: ${String(res.stopReason)}`);
+          return finish("FAILED", `unexpected stop: ${String(res.stopReason)}`);
         }
         const text = res.content
           .filter((b): b is Anthropic.TextBlock => b.type === "text")
           .map((b) => b.text)
           .join("\n");
-        return finish(finalStatus(), text);
+        // Cuarentena previa: no hay informe del agente que validar.
+        if (flags.quarantined) return finish("QUARANTINED");
+
+        const report = parseAgentReport(text);
+        if (!report) {
+          if (reportRetried) return finish("FAILED", "invalid agent report");
+          reportRetried = true;
+          messages.push({ role: "assistant", content: res.content });
+          messages.push({
+            role: "user",
+            content:
+              "Tu respuesta final no es un AgentReport JSON válido. Respondé SOLO con el objeto JSON " +
+              "{category, summary, outcome, findings, suggestedNextStep} según el formato indicado.",
+          });
+          continue;
+        }
+        run.agentReport = report;
+        const mismatch = checkEvidence(report, executed);
+        if (mismatch) {
+          store.append(run, "REPORT_CHECK", { reason: mismatch });
+          flags.blocked = true; // el informe no coincide con la evidencia: requiere revisión humana
+        }
+        return finish(finalStatus());
       }
 
       messages.push({ role: "assistant", content: res.content });
@@ -163,16 +195,16 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
       }
       messages.push({ role: "user", content: results });
     }
-    finish("FAILED", undefined, "max tool steps reached");
+    finish("FAILED", "max tool steps reached");
   }
 
   return {
     /** Crea la corrida y devuelve enseguida; `done` resuelve al terminar (nunca rechaza). */
-    start(emailId: string): { run: Run; done: Promise<void> } {
-      const run = store.create(emailId);
+    start(emailId: string, mode: RunMode = "PROTECTED"): { run: Run; done: Promise<void> } {
+      const run = store.create(emailId, mode);
       store.append(run, "RUN_STARTED");
       const done = execute(emailId, run).catch((err: unknown) => {
-        store.finish(run, "FAILED");
+        store.finish(run, "FAILED", err instanceof Error ? err.name : "error");
         store.append(run, "RUN_FINISHED", {
           reason: err instanceof Error ? err.name : "error",
           detail: { status: "FAILED" },

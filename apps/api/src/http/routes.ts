@@ -1,8 +1,9 @@
 import express from "express";
 import { z } from "zod";
-import { findEmail } from "../company/emails.js";
+import { EMAILS, findEmail } from "../company/emails.js";
 import type { createGuardedAgent } from "../core/AgentRunner.js";
 import type { RunStore } from "../core/RunStore.js";
+import { toProcessingResult } from "../core/result.js";
 
 const StartRunBody = z.object({ emailId: z.string().regex(/^[a-z0-9-]{1,40}$/) });
 
@@ -18,14 +19,19 @@ export function createApp(agent: ReturnType<typeof createGuardedAgent>, store: R
     res.status(202).json({ runId: run.id });
   });
 
+  // Sin cuerpo: el contenido del correo solo llega al agente vía readEmail (y pasa por el Input Guard).
+  app.get("/emails", (_req, res) => {
+    res.json(EMAILS.map(({ id, from, subject }) => ({ id, from, subject })));
+  });
+
   app.get("/runs", (_req, res) => {
-    res.json(store.list());
+    res.json(store.list().map(toProcessingResult));
   });
 
   app.get("/runs/:id", (req, res) => {
     const run = store.get(req.params.id);
     if (!run) return res.status(404).json({ error: "run not found" });
-    res.json(run);
+    res.json(toProcessingResult(run));
   });
 
   return app;

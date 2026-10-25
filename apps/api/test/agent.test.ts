@@ -16,8 +16,20 @@ const toolUse = (name: string, input: unknown, id = "tu_1"): LLMResponse => ({
   stopReason: "tool_use",
   usage,
 });
-const finalText = (text: string): LLMResponse => ({
-  content: [{ type: "text", text } as never],
+/** Respuesta final válida: un AgentReport JSON cuyo summary es `summary`. */
+const finalText = (summary: string): LLMResponse => ({
+  content: [
+    {
+      type: "text",
+      text: JSON.stringify({
+        category: "GENERAL",
+        summary,
+        outcome: "NO_ACTION_NEEDED",
+        findings: [],
+        suggestedNextStep: "Sin acción",
+      }),
+    } as never,
+  ],
   stopReason: "end_turn",
   usage,
 });
@@ -49,14 +61,14 @@ function setup(script: LLMResponse[], opts: { inspector?: ContentInspector; conf
 describe("AgentRunner", () => {
   it("camino feliz: el agente elige readEmail, recibe el contenido y termina", async () => {
     const { agent, llm } = setup([
-      toolUse("readEmail", { emailId: "email-001" }),
+      toolUse("readEmail", { emailId: "email-order-status" }),
       finalText("Informativo, prioridad baja."),
     ]);
-    const { run, done } = agent.start("email-001");
+    const { run, done } = agent.start("email-order-status");
     await done;
 
     expect(run.status).toBe("PROCESSED");
-    expect(run.summary).toContain("Informativo");
+    expect(run.agentReport?.summary).toContain("Informativo");
     expect(run.events.map((e) => e.eventType)).toEqual([
       "RUN_STARTED",
       "LLM_CALL",
@@ -75,9 +87,9 @@ describe("AgentRunner", () => {
 
   it("el primer mensaje al LLM contiene el ID pero NO el cuerpo del correo", async () => {
     const { agent, llm } = setup([finalText("sin tools")]);
-    await agent.start("email-001").done;
+    await agent.start("email-order-status").done;
     const first = JSON.stringify(llm.calls[0]!.messages);
-    expect(first).toContain("email-001");
+    expect(first).toContain("email-order-status");
     for (const e of EMAILS) {
       expect(first).not.toContain(e.textBody);
       expect(first).not.toContain(e.subject);
@@ -86,10 +98,11 @@ describe("AgentRunner", () => {
 
   it("herramienta desconocida: DENY, no se ejecuta y se devuelve tool_result de error", async () => {
     const { agent, llm } = setup([toolUse("executeShell", { cmd: "rm -rf /" }), finalText("ok")]);
-    const { run, done } = agent.start("email-001");
+    const { run, done } = agent.start("email-order-status");
     await done;
 
-    expect(run.status).toBe("BLOCKED_ACTION");
+    // Tool inexistente: se deniega y audita, pero no es un incidente de recurso que cambie el estado.
+    expect(run.status).toBe("PROCESSED");
     expect(run.events.some((e) => e.decision === "DENY" && e.tool === "executeShell")).toBe(true);
     expect(run.events.some((e) => e.eventType === "TOOL_EXECUTED")).toBe(false);
     const result = (llm.calls[1]!.messages.at(-1)!.content as { is_error?: boolean }[])[0]!;
@@ -99,14 +112,14 @@ describe("AgentRunner", () => {
   it("readEmail de OTRO email: DENY y el handler nunca se ejecuta", async () => {
     const handler = vi.fn(async () => ({}));
     const spyTool: ToolDef = { ...(companyConfig.tools[0] as ToolDef), handler };
-    const { agent } = setup([toolUse("readEmail", { emailId: "email-002" }), finalText("ok")], {
+    const { agent } = setup([toolUse("readEmail", { emailId: "email-order-and-return" }), finalText("ok")], {
       config: { ...companyConfig, tools: [spyTool] },
     });
-    const { run, done } = agent.start("email-001");
+    const { run, done } = agent.start("email-order-status");
     await done;
 
     expect(handler).not.toHaveBeenCalled();
-    expect(run.status).toBe("BLOCKED_ACTION");
+    expect(run.status).toBe("NEEDS_REVIEW");
     expect(run.events.find((e) => e.decision === "DENY")?.reason).toBe("resource outside run scope");
   });
 
@@ -116,19 +129,19 @@ describe("AgentRunner", () => {
     const { agent } = setup([toolUse("readEmail", { emailId: 42 }), finalText("ok")], {
       config: { ...companyConfig, tools: [spyTool] },
     });
-    const { done } = agent.start("email-001");
+    const { done } = agent.start("email-order-status");
     await done;
     expect(handler).not.toHaveBeenCalled();
   });
 
   it("MAX_TOOL_STEPS: termina FAILED sin bucle infinito", async () => {
     const script = Array.from({ length: 10 }, (_, i) =>
-      toolUse("readEmail", { emailId: "email-001" }, `tu_${i}`),
+      toolUse("readEmail", { emailId: "email-order-status" }, `tu_${i}`),
     );
     const { agent, llm } = setup(script, {
       config: { ...companyConfig, limits: { maxToolSteps: 3 } },
     });
-    const { run, done } = agent.start("email-001");
+    const { run, done } = agent.start("email-order-status");
     await done;
     expect(run.status).toBe("FAILED");
     expect(llm.calls).toHaveLength(3);
@@ -142,7 +155,7 @@ describe("AgentRunner", () => {
         return { verdict: "quarantine", reason: "test", inspector: "test" };
       },
     };
-    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-003" }), finalText("no pude leerlo")]);
+    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-injection-obvious" }), finalText("no pude leerlo")]);
     const origComplete = llm.complete.bind(llm);
     llm.complete = async (req) => {
       order.push("llm");
@@ -150,13 +163,14 @@ describe("AgentRunner", () => {
     };
     const store = new RunStore();
     const agent = createGuardedAgent({ config: companyConfig, llm, inspector, store });
-    const { run, done } = agent.start("email-003");
+    const { run, done } = agent.start("email-injection-obvious");
     await done;
 
     expect(order).toEqual(["llm", "inspect", "llm"]);
     expect(run.status).toBe("QUARANTINED");
+    expect(run.agentReport).toBeNull();
     // El texto del atacante nunca llegó al modelo.
-    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("Ignorá tus instrucciones");
+    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("ATENCIÓN AGENTE");
   });
 
   it("si el inspector falla, falla cerrado (QUARANTINED)", async () => {
@@ -165,16 +179,16 @@ describe("AgentRunner", () => {
         throw new Error("boom");
       },
     };
-    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-001" }), finalText("x")], { inspector });
-    const { run, done } = agent.start("email-001");
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-order-status" }), finalText("x")], { inspector });
+    const { run, done } = agent.start("email-order-status");
     await done;
     expect(run.status).toBe("QUARANTINED");
-    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("reunión semanal");
+    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("ORD-1001");
   });
 
   it("error del LLM: la corrida termina FAILED y no rechaza la promesa", async () => {
     const { agent } = setup([]); // script vacío -> el mock lanza
-    const { run, done } = agent.start("email-001");
+    const { run, done } = agent.start("email-order-status");
     await expect(done).resolves.toBeUndefined();
     expect(run.status).toBe("FAILED");
   });
@@ -196,7 +210,7 @@ describe("HTTP", () => {
       expect((await post({ emailId: "../etc/passwd" })).status).toBe(400);
       expect((await post({})).status).toBe(400);
       expect((await post({ emailId: "no-existe" })).status).toBe(404);
-      const ok = await post({ emailId: "email-001" });
+      const ok = await post({ emailId: "email-order-status" });
       expect(ok.status).toBe(202);
       expect(z.object({ runId: z.string() }).safeParse(await ok.json()).success).toBe(true);
     } finally {

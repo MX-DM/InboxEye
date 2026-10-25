@@ -26,5 +26,5 @@ const agent = createGuardedAgent({
 
 const { run, done } = agent.start(process.argv[2] ?? "email-001");
 await done;
-console.log(JSON.stringify({ status: run.status, summary: run.summary, tokens: run.tokens }, null, 2));
+console.log(JSON.stringify({ status: run.status, agentReport: run.agentReport, failureReason: run.failureReason, tokens: run.tokens }, null, 2));
 for (const e of run.events) console.log(e.eventType, e.tool ?? "", e.decision ?? "", e.reason ?? "", JSON.stringify(e.detail ?? {}));

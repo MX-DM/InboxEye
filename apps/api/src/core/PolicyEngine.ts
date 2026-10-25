@@ -21,6 +21,10 @@ export class PolicyEngine {
         return { kind: "DENY", reason: "resource outside run scope" };
       }
     }
+
+    const denial = tool.allow?.(input, ctx);
+    if (denial) return { kind: "DENY", reason: denial };
+
     return { kind: "ALLOW" };
   }
 }

@@ -1,17 +1,20 @@
 import { randomUUID } from "node:crypto";
-import type { EventType, Run, RunEvent, RunStatus } from "./types.js";
+import type { EventType, Run, RunEvent, RunMode, RunStatus } from "./types.js";
 
 /** Estado en memoria: se pierde al reiniciar el servidor (documentado). */
 export class RunStore {
   private runs = new Map<string, Run>();
 
-  create(emailId: string): Run {
+  create(emailId: string, mode: RunMode = "PROTECTED"): Run {
     const run: Run = {
       id: randomUUID(),
       emailId,
+      mode,
       status: "PROCESSING",
+      agentReport: null,
       tokens: { input: 0, output: 0 },
       events: [],
+      effects: { tags: [], reviews: [] },
     };
     this.runs.set(run.id, run);
     return run;
@@ -35,8 +38,8 @@ export class RunStore {
     });
   }
 
-  finish(run: Run, status: RunStatus, summary?: string): void {
+  finish(run: Run, status: RunStatus, failureReason?: string): void {
     run.status = status;
-    if (summary !== undefined) run.summary = summary;
+    if (failureReason !== undefined) run.failureReason = failureReason;
   }
 }

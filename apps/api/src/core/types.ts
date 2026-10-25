@@ -1,11 +1,29 @@
 import type { z } from "zod";
 
-export type RunStatus =
-  | "PROCESSING"
-  | "PROCESSED"
-  | "QUARANTINED"
-  | "BLOCKED_ACTION"
-  | "FAILED";
+export type RunMode = "PROTECTED" | "UNPROTECTED_DEMO";
+export type FinalStatus = "PROCESSED" | "NEEDS_REVIEW" | "QUARANTINED" | "FAILED";
+export type RunStatus = "PROCESSING" | FinalStatus;
+export type Risk = "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" | "NOT_ANALYZED";
+
+/** Informe interno producido por Claude. Es lo único que el modelo decide del resultado final. */
+export interface AgentReport {
+  category: "SUPPORT" | "RETURNS" | "FINANCE" | "GENERAL" | "IRRELEVANT";
+  summary: string;
+  outcome: "INFORMATION_FOUND" | "INFORMATION_UNAVAILABLE" | "ESCALATED" | "NO_ACTION_NEEDED";
+  findings: string[];
+  suggestedNextStep: string;
+}
+
+/** Contrato uniforme hacia el frontend: estado, seguridad y eventos los genera el harness. */
+export interface ProcessingResult {
+  runId: string;
+  emailId: string;
+  mode: RunMode;
+  status: RunStatus;
+  agentReport: AgentReport | null;
+  security: { risk: Risk; reason?: string; signals: string[]; deniedActions: number };
+  events: RunEvent[];
+}
 
 export type EventType =
   | "RUN_STARTED"
@@ -14,6 +32,7 @@ export type EventType =
   | "POLICY_DECISION"
   | "TOOL_EXECUTED"
   | "INSPECTION"
+  | "REPORT_CHECK"
   | "RUN_FINISHED";
 
 /** Auditoría append-only. Nunca incluye cuerpos de correo ni secretos. */
@@ -28,18 +47,29 @@ export interface RunEvent {
   detail?: Record<string, string | number | boolean>;
 }
 
+/** Efectos sintéticos de las tools de escritura. Viven en la corrida (no son globales) para aislar runs. */
+export interface RunEffects {
+  tags: { emailId: string; category: string }[];
+  reviews: { emailId: string; reason: string }[];
+}
+
 export interface Run {
   id: string;
   emailId: string;
+  mode: RunMode;
   status: RunStatus;
-  summary?: string;
+  agentReport: AgentReport | null;
+  /** Motivo técnico si terminó FAILED (sin contenido de correos). */
+  failureReason?: string;
   tokens: { input: number; output: number };
   events: RunEvent[];
+  effects: RunEffects;
 }
 
 export interface RunContext {
   runId: string;
   emailId: string;
+  effects: RunEffects;
 }
 
 /** Llamada a herramienta propuesta por el modelo (no confiable hasta validar). */
@@ -65,6 +95,8 @@ export interface ToolDef<S extends z.ZodType = z.ZodType> {
   external?: boolean;
   /** Parámetro que debe coincidir con el emailId asignado a la corrida. */
   scopeToRunEmail?: string;
+  /** Regla de recurso determinista (Action Guard). Devuelve el motivo del rechazo, o null si permite. */
+  allow?: (input: z.infer<S>, ctx: RunContext) => string | null;
   handler: (input: z.infer<S>, ctx: RunContext) => Promise<unknown>;
 }
 
