@@ -1,8 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import type { ContentInspector } from "./inspector.js";
+import type { ContentInspector, Inspection } from "./inspector.js";
 import type { LLMClient } from "./llm.js";
-import { checkEvidence, parseAgentReport, type ExecutedTool } from "./report.js";
+import { checkEvidence, parseAgentReport, reportIssue, type ExecutedTool } from "./report.js";
 import { PolicyEngine } from "./PolicyEngine.js";
 import { RunStore } from "./RunStore.js";
 import {
@@ -22,9 +22,6 @@ export interface GuardedAgentDeps {
   inspector: ContentInspector;
   store: RunStore;
 }
-
-const QUARANTINE_NOTICE =
-  "Contenido retenido por el sistema de seguridad. No está disponible para esta tarea.";
 
 function toApiTool(tool: ToolDef): Anthropic.Tool {
   const schema = z.toJSONSchema(tool.input) as Record<string, unknown>;
@@ -49,7 +46,10 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
 
   async function execute(emailId: string, run: Run): Promise<void> {
     const ctx: RunContext = { runId: run.id, emailId, effects: run.effects };
-    const flags = { blocked: false, quarantined: false };
+    const flags = { blocked: false };
+    // Si el Input Guard retiene el contenido, el run termina sin más acciones del agente.
+    // (cast: se asigna dentro de un closure y TS lo estrecharía a `null`)
+    let halted = null as "QUARANTINED" | "NEEDS_REVIEW" | null;
     const executed: ExecutedTool[] = [];
     let reportRetried = false;
     // Solo el ID viaja al modelo: el cuerpo del correo llega únicamente vía readEmail.
@@ -63,11 +63,7 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
     };
     // Estado de negocio decidido por el harness; Claude solo aporta el AgentReport.
     const finalStatus = (): RunStatus =>
-      flags.quarantined
-        ? "QUARANTINED"
-        : flags.blocked || run.effects.reviews.length > 0
-          ? "NEEDS_REVIEW"
-          : "PROCESSED";
+      flags.blocked || run.effects.reviews.length > 0 ? "NEEDS_REVIEW" : "PROCESSED";
 
     async function handleToolUse(block: Anthropic.ToolUseBlock): Promise<Anthropic.ToolResultBlockParam> {
       const deny = (reason: string, markBlocked: boolean): Anthropic.ToolResultBlockParam => {
@@ -108,26 +104,38 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
         return { type: "tool_result", tool_use_id: block.id, content: serialized };
       }
 
-      let verdict: "safe" | "quarantine" = "quarantine";
-      let reason = "inspection failed";
-      let inspectorName = "unknown";
+      // Falla cerrada: un error del inspector nunca habilita el contenido.
+      let inspection: Inspection = { risk: "UNKNOWN", reason: "inspection failed", signals: [], inspector: "unknown" };
       try {
-        const result = await inspector.inspect(serialized);
-        verdict = result.verdict;
-        reason = result.reason;
-        inspectorName = result.inspector;
+        inspection = await inspector.inspect(serialized);
       } catch {
-        // Falla cerrada: un error del inspector nunca habilita el contenido.
+        // se conserva el UNKNOWN por defecto
       }
+      if (inspection.usage) {
+        run.tokens.input += inspection.usage.input;
+        run.tokens.output += inspection.usage.output;
+      }
+      run.security = {
+        risk: inspection.risk,
+        reason: inspection.reason,
+        signals: inspection.signals,
+        inspector: inspection.inspector,
+      };
       store.append(run, "INSPECTION", {
         tool: block.name,
-        reason,
-        detail: { verdict, inspector: inspectorName, length: serialized.length },
+        reason: inspection.reason,
+        detail: { risk: inspection.risk, inspector: inspection.inspector, length: serialized.length },
       });
 
-      if (verdict !== "safe") {
-        flags.quarantined = true;
-        return { type: "tool_result", tool_use_id: block.id, is_error: true, content: QUARANTINE_NOTICE };
+      if (inspection.risk !== "LOW") {
+        if (inspection.risk === "HIGH") {
+          halted = "QUARANTINED";
+        } else {
+          // MEDIUM o UNKNOWN: retenido y derivado a una persona (texto fijo, sin contenido externo).
+          run.effects.reviews.push({ emailId, reason: `Input Guard: riesgo ${inspection.risk}` });
+          halted = "NEEDS_REVIEW";
+        }
+        return { type: "tool_result", tool_use_id: block.id, is_error: true, content: "Contenido retenido." };
       }
       return {
         type: "tool_result",
@@ -163,19 +171,22 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
           .filter((b): b is Anthropic.TextBlock => b.type === "text")
           .map((b) => b.text)
           .join("\n");
-        // Cuarentena previa: no hay informe del agente que validar.
-        if (flags.quarantined) return finish("QUARANTINED");
-
         const report = parseAgentReport(text);
         if (!report) {
+          store.append(run, "REPORT_CHECK", {
+            reason: `invalid report: ${reportIssue(text)}`,
+            detail: { length: text.length, attempt: reportRetried ? 2 : 1 },
+          });
           if (reportRetried) return finish("FAILED", "invalid agent report");
           reportRetried = true;
           messages.push({ role: "assistant", content: res.content });
           messages.push({
             role: "user",
             content:
-              "Tu respuesta final no es un AgentReport JSON válido. Respondé SOLO con el objeto JSON " +
-              "{category, summary, outcome, findings, suggestedNextStep} según el formato indicado.",
+              "Tu respuesta final no es un AgentReport JSON válido " +
+              `(motivo: ${reportIssue(text)}). Respondé SOLO con el objeto JSON ` +
+              "{category, summary, outcome, findings, suggestedNextStep} según el formato indicado, " +
+              "respetando los límites de longitud (summary ≤ 600, cada finding ≤ 300, suggestedNextStep ≤ 300).",
           });
           continue;
         }
@@ -191,8 +202,10 @@ export function createGuardedAgent(deps: GuardedAgentDeps) {
       messages.push({ role: "assistant", content: res.content });
       const results: Anthropic.ToolResultBlockParam[] = [];
       for (const block of res.content) {
+        if (halted) break;
         if (block.type === "tool_use") results.push(await handleToolUse(block));
       }
+      if (halted) return finish(halted, "input guard withheld content");
       messages.push({ role: "user", content: results });
     }
     finish("FAILED", "max tool steps reached");

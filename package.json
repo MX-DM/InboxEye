@@ -4,5 +4,11 @@
   "version": "0.1.0",
   "workspaces": [
     "apps/*"
-  ]
+  ],
+  "scripts": {
+    "dev:api": "npm run dev -w @inboxeye/api",
+    "dev:web": "npm run dev -w @inboxeye/web",
+    "build": "npm run build -w @inboxeye/api && npm run build -w @inboxeye/web",
+    "test": "npm test -w @inboxeye/api && npm test -w @inboxeye/web"
+  }
 }

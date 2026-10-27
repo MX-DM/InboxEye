@@ -53,12 +53,21 @@ export interface RunEffects {
   reviews: { emailId: string; reason: string }[];
 }
 
+/** Resultado del Input Guard. `reason`/`signals` derivan de contenido externo: solo para UI/auditoría, nunca al agente. */
+export interface RunSecurity {
+  risk: Risk;
+  reason?: string;
+  signals: string[];
+  inspector: string;
+}
+
 export interface Run {
   id: string;
   emailId: string;
   mode: RunMode;
   status: RunStatus;
   agentReport: AgentReport | null;
+  security?: RunSecurity;
   /** Motivo técnico si terminó FAILED (sin contenido de correos). */
   failureReason?: string;
   tokens: { input: number; output: number };

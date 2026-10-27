@@ -24,6 +24,13 @@ export function createApp(agent: ReturnType<typeof createGuardedAgent>, store: R
     res.json(EMAILS.map(({ id, from, subject }) => ({ id, from, subject })));
   });
 
+  // Solo para la consola del operador (humano). El agente sigue recibiendo el cuerpo únicamente vía readEmail.
+  app.get("/emails/:id", (req, res) => {
+    const email = findEmail(req.params.id);
+    if (!email) return res.status(404).json({ error: "email not found" });
+    res.json({ id: email.id, from: email.from, subject: email.subject, body: email.textBody });
+  });
+
   app.get("/runs", (_req, res) => {
     res.json(store.list().map(toProcessingResult));
   });

@@ -6,6 +6,7 @@ import { createGuardedAgent } from "../src/core/AgentRunner.js";
 import { StubInspector, type ContentInspector } from "../src/core/inspector.js";
 import type { LLMClient, LLMRequest, LLMResponse } from "../src/core/llm.js";
 import { RunStore } from "../src/core/RunStore.js";
+import { toProcessingResult } from "../src/core/result.js";
 import type { GuardConfig, ToolDef } from "../src/core/types.js";
 import { createApp } from "../src/http/routes.js";
 
@@ -147,33 +148,47 @@ describe("AgentRunner", () => {
     expect(llm.calls).toHaveLength(3);
   });
 
-  it("el inspector se invoca ANTES del tool_result y puede retener el contenido", async () => {
+  const fixedInspector = (risk: "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN", order?: string[]): ContentInspector => ({
+    async inspect() {
+      order?.push("inspect");
+      return { risk, reason: "test", signals: ["s1"], inspector: "test", usage: { input: 7, output: 3 } };
+    },
+  });
+
+  it("HIGH: el inspector corre ANTES del tool_result, retiene el contenido y el run termina sin otra llamada al agente", async () => {
     const order: string[] = [];
-    const inspector: ContentInspector = {
-      async inspect() {
-        order.push("inspect");
-        return { verdict: "quarantine", reason: "test", inspector: "test" };
-      },
-    };
-    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-injection-obvious" }), finalText("no pude leerlo")]);
+    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-injection-obvious" }), finalText("no debería llamarse")]);
     const origComplete = llm.complete.bind(llm);
     llm.complete = async (req) => {
       order.push("llm");
       return origComplete(req);
     };
     const store = new RunStore();
-    const agent = createGuardedAgent({ config: companyConfig, llm, inspector, store });
+    const agent = createGuardedAgent({ config: companyConfig, llm, inspector: fixedInspector("HIGH", order), store });
     const { run, done } = agent.start("email-injection-obvious");
     await done;
 
-    expect(order).toEqual(["llm", "inspect", "llm"]);
+    expect(order).toEqual(["llm", "inspect"]);
+    expect(llm.calls).toHaveLength(1);
     expect(run.status).toBe("QUARANTINED");
     expect(run.agentReport).toBeNull();
-    // El texto del atacante nunca llegó al modelo.
-    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("ATENCIÓN AGENTE");
+    expect(JSON.stringify(llm.calls)).not.toContain("ATENCIÓN AGENTE");
+    expect(toProcessingResult(run).security.risk).toBe("HIGH");
   });
 
-  it("si el inspector falla, falla cerrado (QUARANTINED)", async () => {
+  it("MEDIUM: retiene el contenido y deriva a NEEDS_REVIEW con motivo fijo", async () => {
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-injection-subtle" }), finalText("x")], {
+      inspector: fixedInspector("MEDIUM"),
+    });
+    const { run, done } = agent.start("email-injection-subtle");
+    await done;
+    expect(run.status).toBe("NEEDS_REVIEW");
+    expect(run.effects.reviews).toEqual([{ emailId: "email-injection-subtle", reason: "Input Guard: riesgo MEDIUM" }]);
+    expect(llm.calls).toHaveLength(1);
+    expect(JSON.stringify(llm.calls)).not.toContain("nómina");
+  });
+
+  it("si el inspector lanza una excepción: UNKNOWN, retiene y deriva a revisión (falla cerrado)", async () => {
     const inspector: ContentInspector = {
       async inspect() {
         throw new Error("boom");
@@ -182,8 +197,45 @@ describe("AgentRunner", () => {
     const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-order-status" }), finalText("x")], { inspector });
     const { run, done } = agent.start("email-order-status");
     await done;
+    expect(run.status).toBe("NEEDS_REVIEW");
+    expect(toProcessingResult(run).security.risk).toBe("UNKNOWN");
+    expect(llm.calls).toHaveLength(1);
+    expect(JSON.stringify(llm.calls)).not.toContain("ORD-1001");
+  });
+
+  it("tras retener el contenido no se ejecuta ninguna otra tool del mismo turno", async () => {
+    const twoTools: LLMResponse = {
+      content: [
+        { type: "tool_use", id: "tu_a", name: "readEmail", input: { emailId: "email-injection-obvious" } },
+        { type: "tool_use", id: "tu_b", name: "tagEmail", input: { emailId: "email-injection-obvious", category: "GENERAL" } },
+      ] as never,
+      stopReason: "tool_use",
+      usage,
+    };
+    const { agent } = setup([twoTools], { inspector: fixedInspector("HIGH") });
+    const { run, done } = agent.start("email-injection-obvious");
+    await done;
     expect(run.status).toBe("QUARANTINED");
-    expect(JSON.stringify(llm.calls[1]!.messages)).not.toContain("ORD-1001");
+    expect(run.effects.tags).toEqual([]);
+  });
+
+  it("LOW admite el contenido y los tokens del clasificador cuentan en la corrida", async () => {
+    const report = JSON.stringify({
+      category: "GENERAL",
+      summary: "Informativo.",
+      outcome: "NO_ACTION_NEEDED",
+      findings: [],
+      suggestedNextStep: "Ninguno.",
+    });
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-info-general" }), finalText(report)], {
+      inspector: fixedInspector("LOW"),
+    });
+    const { run, done } = agent.start("email-info-general");
+    await done;
+    expect(run.status).toBe("PROCESSED");
+    expect(JSON.stringify(llm.calls[1]!.messages)).toContain("trust=");
+    expect(run.tokens).toEqual({ input: 10 + 10 + 7, output: 5 + 5 + 3 });
+    expect(toProcessingResult(run).security).toMatchObject({ risk: "LOW", signals: ["s1"] });
   });
 
   it("error del LLM: la corrida termina FAILED y no rechaza la promesa", async () => {

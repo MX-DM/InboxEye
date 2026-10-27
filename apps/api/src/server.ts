@@ -1,19 +1,21 @@
 import "dotenv/config";
-import { companyConfig } from "./company/config.js";
+import { companyConfig, GUARD_MISSION } from "./company/config.js";
 import { createGuardedAgent } from "./core/AgentRunner.js";
-import { StubInspector } from "./core/inspector.js";
+import { InputGuard } from "./core/inputGuard.js";
 import { AnthropicClient } from "./core/llm.js";
 import { RunStore } from "./core/RunStore.js";
 import { createApp } from "./http/routes.js";
 
 const model = process.env.ANTHROPIC_MODEL;
 if (!model) throw new Error("ANTHROPIC_MODEL no configurado (ver .env.example)");
+// El clasificador usa un cliente aparte; por defecto el mismo modelo que el agente.
+const guardModel = process.env.ANTHROPIC_GUARD_MODEL ?? model;
 
 const store = new RunStore();
 const agent = createGuardedAgent({
   config: companyConfig,
   llm: new AnthropicClient(model, process.env.ANTHROPIC_API_KEY),
-  inspector: new StubInspector(), // TODO Incremento 2: SecurityAnalyzer real
+  inspector: new InputGuard(new AnthropicClient(guardModel, process.env.ANTHROPIC_API_KEY), GUARD_MISSION),
   store,
 });
 

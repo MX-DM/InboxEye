@@ -22,6 +22,28 @@ export function parseAgentReport(text: string): AgentReport | null {
   }
 }
 
+/**
+ * Motivo ESTRUCTURAL por el que un texto final no es un AgentReport válido (rutas y códigos de Zod).
+ * Nunca incluye contenido del modelo: es seguro para auditoría.
+ */
+export function reportIssue(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) return "no JSON object found";
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text.slice(start, end + 1));
+  } catch {
+    return "JSON.parse failed";
+  }
+  const result = AgentReportSchema.safeParse(raw);
+  if (result.success) return "valid";
+  return result.error.issues
+    .slice(0, 5)
+    .map((i) => `${i.path.join(".") || "(root)"}:${i.code}`)
+    .join(", ");
+}
+
 export interface ExecutedTool {
   tool: string;
   output: unknown;

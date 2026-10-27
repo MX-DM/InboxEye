@@ -285,6 +285,13 @@ describe("AgentReport y estado final", () => {
     expect(run.status).toBe("FAILED");
     expect(run.failureReason).toBe("invalid agent report");
     expect(run.agentReport).toBeNull();
+    // Cada intento fallido deja el motivo estructural, sin copiar el texto del modelo.
+    const checks = run.events.filter((e) => e.eventType === "REPORT_CHECK");
+    expect(checks.map((e) => e.reason)).toEqual([
+      "invalid report: no JSON object found",
+      expect.stringContaining("category:"),
+    ]);
+    expect(JSON.stringify(checks)).not.toContain("texto libre");
   });
 });
 
@@ -310,6 +317,11 @@ describe("ProcessingResult y API", () => {
       const emails = (await (await fetch(`${base}/emails`)).json()) as Record<string, unknown>[];
       expect(emails.length).toBeGreaterThanOrEqual(5);
       expect(emails.every((e) => !("textBody" in e) && !("body" in e))).toBe(true);
+
+      // Detalle para la consola del operador: sí incluye el cuerpo; un ID inexistente da 404.
+      const detail = (await (await fetch(`${base}/emails/email-injection-obvious`)).json()) as { body: string };
+      expect(detail.body).toContain("ATENCIÓN AGENTE");
+      expect((await fetch(`${base}/emails/no-existe`)).status).toBe(404);
 
       const { run, done } = agent.start("email-info-general");
       await done;
