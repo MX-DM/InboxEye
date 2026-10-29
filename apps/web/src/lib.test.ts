@@ -13,6 +13,13 @@ import {
   toolTable,
   runModel,
   sameAgentConfig,
+  pipelineStages,
+  signalChips,
+  categoryLabel,
+  outcomeLabel,
+  outcomeTone,
+  eventTech,
+  traceLevel,
 } from "./lib";
 import type { ProcessingResult, RunEvent } from "./types";
 
@@ -342,5 +349,128 @@ describe("eventos de entrega e inspección desactivada", () => {
     const line = describeEvent(ev({ eventType: "INSPECTION", detail: { enabled: false, risk: "NOT_ANALYZED", inspector: "none" } }));
     expect(line.text).toContain("Desactivado");
     expect(line.text).not.toContain("Riesgo");
+  });
+});
+
+describe("pipelineStages: el recorrido sale solo de eventos reales", () => {
+  const e = (eventType: string, extra: Partial<RunEvent> = {}) => ev({ eventType, ...extra });
+  const readOk = [
+    e("TOOL_PROPOSED", { tool: "readEmail", detail: { input: '{"emailId":"email-001"}' } }),
+    e("POLICY_DECISION", { tool: "readEmail", decision: "ALLOW" }),
+    e("TOOL_EXECUTED", { tool: "readEmail", detail: { input: '{"emailId":"email-001"}' } }),
+  ];
+  const by = (stages: ReturnType<typeof pipelineStages>, key: string) => stages.find((s) => s.key === key)!;
+
+  it("protegido con riesgo alto: guard y entrega retenidos, el agente no llegó a actuar", () => {
+    const r = run("a", "QUARANTINED", [
+      ...readOk,
+      e("INSPECTION", { tool: "readEmail", detail: { enabled: true, risk: "HIGH", inspector: "input-guard" } }),
+      e("CONTENT_WITHHELD", { tool: "readEmail", detail: { risk: "HIGH", length: 300 } }),
+    ]);
+    const s = pipelineStages(r);
+    expect(by(s, "read").state).toBe("ok");
+    expect(by(s, "guard")).toMatchObject({ state: "hold", headline: "Riesgo alto" });
+    expect(by(s, "delivery")).toMatchObject({ state: "hold", headline: "Bloqueada" });
+    expect(by(s, "actions")).toMatchObject({ state: "idle", headline: "No llegó a actuar" });
+    expect(by(s, "result")).toMatchObject({ state: "hold", headline: "En cuarentena" });
+  });
+
+  it("sin protección: guard desactivado, contenido entregado y acciones contadas desde los eventos", () => {
+    const r = run(
+      "a",
+      "NEEDS_REVIEW",
+      [
+        ...readOk,
+        e("INSPECTION", { tool: "readEmail", detail: { enabled: false, risk: "NOT_ANALYZED", inspector: "none" } }),
+        e("CONTENT_DELIVERED", { tool: "readEmail", detail: { length: 318, trust: "untrusted" } }),
+        ...req2("flagForReview"),
+        ...req2("tagEmail"),
+      ],
+      { mode: "UNPROTECTED_DEMO", agentReport: report("x") },
+    );
+    const s = pipelineStages(r);
+    expect(by(s, "guard")).toMatchObject({ state: "off", headline: "Desactivado" });
+    expect(by(s, "delivery")).toMatchObject({ state: "ok", headline: "Entregado" });
+    expect(by(s, "delivery").detail).toContain("318 caracteres");
+    expect(by(s, "actions")).toMatchObject({ state: "ok", headline: "2 herramientas pedidas", detail: "2 ejecutadas, 0 denegadas." });
+    expect(by(s, "result")).toMatchObject({ state: "warn", headline: "Requiere revisión", detail: "Información encontrada" });
+
+    function req2(tool: string) {
+      return [
+        e("TOOL_PROPOSED", { tool, detail: { input: "{}" } }),
+        e("POLICY_DECISION", { tool, decision: "ALLOW" }),
+        e("TOOL_EXECUTED", { tool, detail: { input: "{}" } }),
+      ];
+    }
+  });
+
+  it("una acción denegada pone la etapa de acciones en rojo", () => {
+    const r = run("a", "NEEDS_REVIEW", [
+      ...readOk,
+      e("TOOL_PROPOSED", { tool: "readInternalDocument", detail: { input: PAYROLL } }),
+      e("POLICY_DECISION", { tool: "readInternalDocument", decision: "DENY", reason: "document not permitted" }),
+    ]);
+    const a = pipelineStages(r).find((s) => s.key === "actions")!;
+    expect(a).toMatchObject({ state: "deny", detail: "0 ejecutadas, 1 denegada (document not permitted)." });
+  });
+
+  it("riesgo bajo es verde; riesgo no evaluable (falla cerrada) retiene", () => {
+    const g = (risk: string) =>
+      pipelineStages(run("a", "PROCESSED", [e("INSPECTION", { detail: { enabled: true, risk } })])).find((s) => s.key === "guard")!;
+    expect(g("LOW")).toMatchObject({ state: "ok", headline: "Riesgo bajo" });
+    expect(g("MEDIUM")).toMatchObject({ state: "hold", headline: "Riesgo medio" });
+    expect(g("UNKNOWN")).toMatchObject({ state: "hold", headline: "No se pudo evaluar" });
+  });
+
+  it("sin eventos no se inventa nada: todo queda en reposo", () => {
+    const s = pipelineStages(run("a", "PROCESSING"));
+    expect(by(s, "read")).toMatchObject({ state: "idle", headline: "No pidió leer el correo" });
+    expect(by(s, "guard")).toMatchObject({ state: "idle", headline: "Sin evaluación" });
+    expect(by(s, "delivery")).toMatchObject({ state: "idle", headline: "Sin entrega" });
+    expect(by(s, "result")).toMatchObject({ state: "idle", headline: "En curso" });
+  });
+
+  it("una corrida fallida muestra su motivo técnico", () => {
+    const s = pipelineStages(run("a", "FAILED", [e("RUN_FINISHED", { reason: "invalid agent report" })]));
+    expect(by(s, "result")).toMatchObject({ state: "fail", detail: "invalid agent report" });
+  });
+});
+
+describe("textos de presentación", () => {
+  it("traduce categorías y resultados conocidos y deja pasar los desconocidos", () => {
+    expect(categoryLabel("FINANCE")).toBe("Finanzas");
+    expect(categoryLabel("NUEVA")).toBe("NUEVA");
+    expect(outcomeLabel("ESCALATED")).toBe("Derivado a revisión");
+    expect(outcomeTone("INFORMATION_FOUND")).toBe("ok");
+    expect(outcomeTone("ESCALATED")).toBe("warn");
+    expect(outcomeTone("NO_ACTION_NEEDED")).toBe("idle");
+  });
+
+  it("las señales estáticas se traducen y se distinguen de las del clasificador", () => {
+    const chips = signalChips(["static:ignora_instrucciones", "static:regla_nueva", "orden al agente"]);
+    expect(chips).toEqual([
+      { source: "regla", text: "Pide ignorar instrucciones" },
+      { source: "regla", text: "regla_nueva" },
+      { source: "clasificador", text: "orden al agente" },
+    ]);
+  });
+
+  it("el detalle técnico incluye hora, campos auditados y motivo", () => {
+    const tech = eventTech(ev({ eventType: "INSPECTION", reason: "motivo", detail: { risk: "HIGH", input: '{"a":1}' } }));
+    expect(tech.map(([k]) => k)).toEqual(["hora", "risk", "argumentos", "motivo"]);
+  });
+
+  it("la traza indenta lo que provoca cada decisión del agente", () => {
+    expect(traceLevel(ev({ eventType: "LLM_CALL" }))).toBe(0);
+    expect(traceLevel(ev({ eventType: "RUN_FINISHED" }))).toBe(0);
+    expect(traceLevel(ev({ eventType: "TOOL_EXECUTED" }))).toBe(1);
+    expect(traceLevel(ev({ eventType: "CONTENT_DELIVERED" }))).toBe(1);
+  });
+
+  it("las llamadas al modelo se describen por su paso y su parada, no por tokens", () => {
+    const t = (detail: Record<string, string | number>) => describeEvent(ev({ eventType: "LLM_CALL", detail })).text;
+    expect(t({ step: 0, stop: "tool_use" })).toContain("recibe la misión");
+    expect(t({ step: 1, stop: "tool_use" })).toContain("siguiente paso");
+    expect(t({ step: 3, stop: "end_turn" })).toContain("informe final");
   });
 });

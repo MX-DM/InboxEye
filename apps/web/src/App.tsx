@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchEmail, fetchEmails, fetchRun, fetchRuns, startRun } from "./api";
 import { Detail } from "./Detail";
+import { BrandMark, Icon } from "./Icons";
 import { Inbox } from "./Inbox";
-import { comparisonPair, countByStatus, latestRunByEmail, STATUS_LABEL, statusOf } from "./lib";
-import type { EmailDetail, EmailSummary, ProcessingResult, UiStatus } from "./types";
+import { comparisonPair, countByStatus, latestRunByEmail, statusOf } from "./lib";
+import type { EmailDetail, EmailSummary, ProcessingResult } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const MAX_WAIT_MS = 120_000;
@@ -121,26 +122,32 @@ export default function App() {
     });
 
   const viewed = emails.find((e) => e.id === viewedId);
-  const order: UiStatus[] = ["PENDING", "PROCESSING", "PROCESSED", "NEEDS_REVIEW", "QUARANTINED", "FAILED"];
 
   return (
     <div className="app">
       <header className="topbar">
-        <h1>InboxEye</h1>
-        <span className="tagline">Harness de seguridad para agentes de correo · demo local con datos sintéticos (NovaShop)</span>
-        <div className="counters">
-          {order.map((s) => (
-            <span key={s} className={`badge badge-${s}`}>
-              {STATUS_LABEL[s]}: {counts[s]}
-            </span>
-          ))}
+        <div className="brand">
+          <BrandMark />
+          <div>
+            <h1>InboxEye</h1>
+            <p className="brand-sub">Seguridad para agentes que procesan correo</p>
+          </div>
         </div>
+        <span className="sandbox-pill" title="Correos, herramientas y datos simulados. No se envía nada real.">
+          <Icon name="shield" size={14} />
+          Entorno de pruebas con datos sintéticos
+        </span>
       </header>
-      {error && <div className="error" role="alert">{error}</div>}
+      {error && (
+        <div className="error" role="alert">
+          {error}
+        </div>
+      )}
       <main className="layout">
         <Inbox
           emails={emails}
           latest={latest}
+          counts={counts}
           viewedId={viewedId}
           checked={checked}
           busy={busy}
@@ -151,20 +158,23 @@ export default function App() {
           onProcessSelected={processSelected}
           onProcessPending={() => void process(pendingIds)}
         />
-        {viewed ? (
-          <Detail
-            email={detail}
-            emailId={viewed.id}
-            subject={viewed.subject}
-            run={latest.get(viewed.id)}
-            pair={comparisonPair(runs, viewed.id)}
-            busy={busy}
-            onProcess={() => void process([viewed.id])}
-            onCompare={() => void compare(viewed.id)}
-          />
-        ) : (
-          <p className="muted">Elegí un correo de la bandeja.</p>
-        )}
+        <section className="main">
+          {viewed ? (
+            <Detail
+              email={detail}
+              emailId={viewed.id}
+              subject={viewed.subject}
+              from={viewed.from}
+              run={latest.get(viewed.id)}
+              pair={comparisonPair(runs, viewed.id)}
+              busy={busy}
+              onProcess={() => void process([viewed.id])}
+              onCompare={() => void compare(viewed.id)}
+            />
+          ) : (
+            <p className="muted">Elegí un correo de la bandeja.</p>
+          )}
+        </section>
       </main>
     </div>
   );

@@ -283,12 +283,16 @@ export function describeEvent(e: RunEvent): TraceLine {
       return d.mode === "UNPROTECTED_DEMO"
         ? { label: "Inicio", text: "Corrida SIN PROTECCIÓN (demo): Input Guard y reglas de recursos desactivados.", tone: "warn" }
         : { label: "Inicio", text: "Corrida iniciada (el agente solo recibe el ID del correo).", tone: "info" };
-    case "LLM_CALL":
-      return {
-        label: "Agente",
-        text: `Llamada a Claude (paso ${d.step}) · ${d.input}→${d.output} tokens · stop: ${d.stop}`,
-        tone: "info",
-      };
+    case "LLM_CALL": {
+      // El texto se deduce solo de campos auditados (paso y motivo de parada); los tokens van en el detalle técnico.
+      const text =
+        Number(d.step) === 0
+          ? "El agente recibe la misión y decide su primer paso"
+          : d.stop === "end_turn"
+            ? "El agente redacta su informe final"
+            : "El agente analiza el resultado y decide el siguiente paso";
+      return { label: "Agente", text, tone: "info" };
+    }
     case "TOOL_PROPOSED":
       return { label: "Agente", text: `Pidió la herramienta ${e.tool}${withArgs}`, tone: "info" };
     case "POLICY_DECISION":
@@ -333,3 +337,148 @@ export function noReportMessage(run: ProcessingResult): string {
   const fin = [...run.events].reverse().find((e) => e.eventType === "RUN_FINISHED");
   return `Sin informe: la corrida falló${fin?.reason ? ` (${fin.reason})` : ""}.`;
 }
+
+// ---------- Presentación de la consola ----------
+// Todo lo siguiente deriva de eventos y resultados reales de la corrida: no se inventa ningún evento.
+
+const CATEGORY_LABEL: Record<string, string> = {
+  SUPPORT: "Soporte",
+  RETURNS: "Devoluciones",
+  FINANCE: "Finanzas",
+  GENERAL: "General",
+  IRRELEVANT: "Irrelevante",
+};
+const OUTCOME_LABEL: Record<string, string> = {
+  INFORMATION_FOUND: "Información encontrada",
+  INFORMATION_UNAVAILABLE: "Información no disponible",
+  ESCALATED: "Derivado a revisión",
+  NO_ACTION_NEEDED: "Sin acción necesaria",
+};
+
+export const categoryLabel = (c: string): string => CATEGORY_LABEL[c] ?? c;
+export const outcomeLabel = (o: string): string => OUTCOME_LABEL[o] ?? o;
+export const outcomeTone = (o: string): "ok" | "warn" | "idle" =>
+  o === "INFORMATION_FOUND" ? "ok" : o === "ESCALATED" ? "warn" : "idle";
+
+const SIGNAL_LABEL: Record<string, string> = {
+  ignora_instrucciones: "Pide ignorar instrucciones",
+  ignore_instructions_en: "Pide ignorar instrucciones (inglés)",
+  dirigido_al_agente: "Se dirige al agente",
+  ordena_al_asistente: "Da órdenes al asistente",
+  menciona_herramientas: "Menciona herramientas",
+  recurso_restringido: "Alude a un recurso restringido",
+  ocultar_accion: "Pide ocultar una acción",
+  autoridad_declarada: "Declara autorización",
+  prompt_del_sistema: "Menciona el prompt del sistema",
+};
+
+export interface SignalChip {
+  text: string;
+  source: "regla" | "clasificador";
+}
+
+/** Las señales estáticas llegan como `static:<nombre>`; las del clasificador, como texto libre (siempre se muestra escapado). */
+export function signalChips(signals: string[]): SignalChip[] {
+  return signals.map((s) =>
+    s.startsWith("static:")
+      ? { source: "regla", text: SIGNAL_LABEL[s.slice(7)] ?? s.slice(7) }
+      : { source: "clasificador", text: s },
+  );
+}
+
+export type StageState = "ok" | "deny" | "hold" | "warn" | "off" | "idle" | "fail";
+
+export interface Stage {
+  key: "read" | "guard" | "delivery" | "actions" | "result";
+  label: string;
+  state: StageState;
+  headline: string;
+  detail?: string;
+}
+
+/**
+ * Recorrido del correo en cinco etapas: lectura, Input Guard, entrega al agente, acciones y resultado.
+ * Cada etapa se resuelve solo con eventos auditados; sin evento, queda en `idle` (no se supone nada).
+ */
+export function pipelineStages(run: ProcessingResult): Stage[] {
+  const rows = toolTable(run);
+  const read = rows.find((r) => r.tool === "readEmail");
+  const insp = run.events.find((e) => e.eventType === "INSPECTION");
+  const delivered = run.events.find((e) => e.eventType === "CONTENT_DELIVERED");
+  const withheld = run.events.find((e) => e.eventType === "CONTENT_WITHHELD");
+
+  let readStage: Stage;
+  if (!read) readStage = { key: "read", label: "Lectura del correo", state: "idle", headline: "No pidió leer el correo" };
+  else if (read.decision === "DENY")
+    readStage = { key: "read", label: "Lectura del correo", state: "deny", headline: "Lectura denegada", detail: read.reason };
+  else if (read.decision === "ALLOW" && read.executed)
+    readStage = { key: "read", label: "Lectura del correo", state: "ok", headline: "Permitida y ejecutada", detail: "La política autorizó readEmail y el backend la ejecutó." };
+  else readStage = { key: "read", label: "Lectura del correo", state: "warn", headline: "Sin ejecución", detail: "readEmail no llegó a ejecutarse." };
+
+  const d = insp?.detail ?? {};
+  let guard: Stage;
+  if (!insp) guard = { key: "guard", label: "Input Guard", state: "idle", headline: "Sin evaluación", detail: "El contenido no llegó a este control." };
+  else if (d.enabled === false)
+    guard = { key: "guard", label: "Input Guard", state: "off", headline: "Desactivado", detail: "El contenido no se evaluó." };
+  else if (d.risk === "LOW")
+    guard = { key: "guard", label: "Input Guard", state: "ok", headline: "Riesgo bajo", detail: "Se admite como dato no confiable." };
+  else if (d.risk === "HIGH")
+    guard = { key: "guard", label: "Input Guard", state: "hold", headline: "Riesgo alto", detail: "Contenido retenido." };
+  else if (d.risk === "MEDIUM")
+    guard = { key: "guard", label: "Input Guard", state: "hold", headline: "Riesgo medio", detail: "Contenido retenido y derivado a revisión." };
+  else guard = { key: "guard", label: "Input Guard", state: "hold", headline: "No se pudo evaluar", detail: "Falla cerrada: contenido retenido." };
+
+  let delivery: Stage;
+  if (delivered)
+    delivery = { key: "delivery", label: "Entrega al agente", state: "ok", headline: "Entregado", detail: `${delivered.detail?.length ?? "?"} caracteres, marcados como no confiables.` };
+  else if (withheld)
+    delivery = { key: "delivery", label: "Entrega al agente", state: "hold", headline: "Bloqueada", detail: "El agente no recibió el contenido." };
+  else delivery = { key: "delivery", label: "Entrega al agente", state: "idle", headline: "Sin entrega", detail: "No hubo contenido externo que entregar." };
+
+  const others = rows.filter((r) => r.tool !== "readEmail");
+  let actions: Stage;
+  if (others.length === 0) {
+    actions = {
+      key: "actions",
+      label: "Acciones del agente",
+      state: "idle",
+      headline: withheld ? "No llegó a actuar" : "Sin acciones adicionales",
+      detail: withheld ? "La corrida terminó antes de que el agente pudiera actuar." : "El agente no pidió más herramientas.",
+    };
+  } else {
+    const executed = others.filter((r) => r.executed).length;
+    const denied = others.filter((r) => r.decision === "DENY").length;
+    const reasons = [...new Set(others.filter((r) => r.decision === "DENY" && r.reason).map((r) => r.reason as string))];
+    actions = {
+      key: "actions",
+      label: "Acciones del agente",
+      state: denied > 0 ? "deny" : "ok",
+      headline: `${others.length} ${others.length === 1 ? "herramienta pedida" : "herramientas pedidas"}`,
+      detail: `${executed} ${executed === 1 ? "ejecutada" : "ejecutadas"}, ${denied} ${denied === 1 ? "denegada" : "denegadas"}${reasons.length ? ` (${reasons.join(", ")})` : ""}.`,
+    };
+  }
+
+  const finishedReason = [...run.events].reverse().find((e) => e.eventType === "RUN_FINISHED")?.reason;
+  const outcome = run.agentReport ? outcomeLabel(run.agentReport.outcome) : undefined;
+  const resultByStatus: Record<ProcessingResult["status"], Stage> = {
+    PROCESSING: { key: "result", label: "Resultado", state: "idle", headline: "En curso" },
+    PROCESSED: { key: "result", label: "Resultado", state: "ok", headline: STATUS_LABEL.PROCESSED, detail: outcome },
+    NEEDS_REVIEW: { key: "result", label: "Resultado", state: "warn", headline: STATUS_LABEL.NEEDS_REVIEW, detail: outcome ?? "Derivado a revisión humana." },
+    QUARANTINED: { key: "result", label: "Resultado", state: "hold", headline: STATUS_LABEL.QUARANTINED, detail: "Sin informe del agente." },
+    FAILED: { key: "result", label: "Resultado", state: "fail", headline: STATUS_LABEL.FAILED, detail: finishedReason },
+  };
+
+  return [readStage, guard, delivery, actions, resultByStatus[run.status]];
+}
+
+/** Detalle técnico de un evento (hora, campos auditados). Para la sección expandible de la traza. */
+export function eventTech(e: RunEvent): [string, string][] {
+  const out: [string, string][] = [["hora", new Date(e.ts).toLocaleTimeString()]];
+  for (const [k, v] of Object.entries(e.detail ?? {})) out.push([k === "input" ? "argumentos" : k, String(v)]);
+  if (e.reason) out.push(["motivo", e.reason]);
+  return out;
+}
+
+/** Nivel de sangría en la línea de tiempo: las decisiones del agente al borde y lo que provocan, anidado. */
+export const traceLevel = (e: RunEvent): 0 | 1 =>
+  e.eventType === "LLM_CALL" || e.eventType === "RUN_STARTED" || e.eventType === "RUN_FINISHED" ? 0 : 1;
