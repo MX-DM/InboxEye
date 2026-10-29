@@ -29,17 +29,17 @@ const json = (o: unknown) => JSON.stringify(o);
 
 describe("staticSignals (sin IA)", () => {
   it("detecta patrones de inyección explícita", () => {
-    const s = staticSignals(serialize("email-injection-obvious"));
+    const s = staticSignals(serialize("email-004"));
     expect(s).toEqual(expect.arrayContaining(["ignora_instrucciones", "dirigido_al_agente", "menciona_herramientas", "recurso_restringido", "ocultar_accion"]));
   });
 
   it("detecta la suplantación de autoridad del caso sutil", () => {
-    const s = staticSignals(serialize("email-injection-subtle"));
+    const s = staticSignals(serialize("email-011"));
     expect(s).toEqual(expect.arrayContaining(["autoridad_declarada", "ordena_al_asistente", "recurso_restringido"]));
   });
 
   it("no marca correos legítimos (consulta de pedido, cambio bancario, información)", () => {
-    for (const id of ["email-order-status", "email-bank-change", "email-info-general", "email-order-and-return"]) {
+    for (const id of ["email-001", "email-003", "email-009", "email-002"]) {
       expect(staticSignals(serialize(id))).toEqual([]);
     }
   });
@@ -50,7 +50,7 @@ describe("InputGuard (clasificador con mock)", () => {
 
   it.each(["LOW", "MEDIUM", "HIGH"] as const)("respuesta válida %s se propaga con señales y uso de tokens", async (risk) => {
     const llm = new MockLLM(reply(json({ risk, reason: "motivo", signals: ["orden al agente"] })));
-    const r = await guard(llm).inspect(serialize("email-injection-obvious"));
+    const r = await guard(llm).inspect(serialize("email-004"));
     expect(r.risk).toBe(risk);
     expect(r.reason).toBe("motivo");
     expect(r.signals).toContain("orden al agente");
@@ -61,7 +61,7 @@ describe("InputGuard (clasificador con mock)", () => {
 
   it("tolera JSON dentro de un bloque ```json", async () => {
     const llm = new MockLLM(reply("```json\n" + json({ risk: "LOW", reason: "ok", signals: [] }) + "\n```"));
-    expect((await guard(llm).inspect(serialize("email-order-status"))).risk).toBe("LOW");
+    expect((await guard(llm).inspect(serialize("email-001"))).risk).toBe("LOW");
   });
 
   it.each([
@@ -70,13 +70,13 @@ describe("InputGuard (clasificador con mock)", () => {
     ["falta reason", reply(json({ risk: "LOW", signals: [] }))],
     ["corte por max_tokens", reply(json({ risk: "LOW", reason: "x", signals: [] }), "max_tokens")],
   ])("falla cerrado a UNKNOWN: %s", async (_name, response) => {
-    const r = await guard(new MockLLM(response)).inspect(serialize("email-order-status"));
+    const r = await guard(new MockLLM(response)).inspect(serialize("email-001"));
     expect(r.risk).toBe("UNKNOWN");
     expect(r.reason).toBe("classifier output invalid");
   });
 
   it("falla cerrado a UNKNOWN si la llamada al clasificador lanza una excepción", async () => {
-    const r = await guard(new MockLLM(new Error("network"))).inspect(serialize("email-order-status"));
+    const r = await guard(new MockLLM(new Error("network"))).inspect(serialize("email-001"));
     expect(r.risk).toBe("UNKNOWN");
     expect(r.reason).toBe("classifier call failed");
   });
@@ -84,14 +84,14 @@ describe("InputGuard (clasificador con mock)", () => {
   it("un correo que ordena 'LOW' no engaña: solo cuenta el JSON validado del clasificador", async () => {
     // El clasificador (mock) responde HIGH aunque el correo pida ser clasificado como seguro.
     const llm = new MockLLM(reply(json({ risk: "HIGH", reason: "orden al agente", signals: [] })));
-    const r = await guard(llm).inspect(serialize("email-injection-obvious"));
+    const r = await guard(llm).inspect(serialize("email-004"));
     expect(r.risk).toBe("HIGH");
   });
 
   it("el clasificador no recibe tools; el correo viaja como dato delimitado, no en el system", async () => {
     const llm = new MockLLM(reply(json({ risk: "LOW", reason: "ok", signals: [] })));
-    const body = findEmail("email-injection-obvious")!.textBody;
-    await guard(llm).inspect(serialize("email-injection-obvious"));
+    const body = findEmail("email-004")!.textBody;
+    await guard(llm).inspect(serialize("email-004"));
 
     const req = llm.calls[0]!;
     expect(req.tools).toBeUndefined();
@@ -107,7 +107,7 @@ describe("InputGuard (clasificador con mock)", () => {
     const llm = new MockLLM(
       reply(json({ risk: "MEDIUM", reason: "x".repeat(900), signals: Array.from({ length: 12 }, () => "y".repeat(500)) })),
     );
-    const r = await guard(llm).inspect(serialize("email-injection-subtle"));
+    const r = await guard(llm).inspect(serialize("email-011"));
     expect(r.risk).toBe("MEDIUM");
     expect(r.reason.length).toBe(300);
     expect(r.signals.filter((s) => !s.startsWith("static:"))).toHaveLength(6);

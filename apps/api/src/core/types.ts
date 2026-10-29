@@ -32,6 +32,10 @@ export type EventType =
   | "POLICY_DECISION"
   | "TOOL_EXECUTED"
   | "INSPECTION"
+  /** El contenido externo entró al contexto del agente. */
+  | "CONTENT_DELIVERED"
+  /** El contenido externo fue retenido: el agente NO lo recibió. */
+  | "CONTENT_WITHHELD"
   | "REPORT_CHECK"
   | "RUN_FINISHED";
 
@@ -79,6 +83,7 @@ export interface RunContext {
   runId: string;
   emailId: string;
   effects: RunEffects;
+  mode: RunMode;
 }
 
 /** Llamada a herramienta propuesta por el modelo (no confiable hasta validar). */

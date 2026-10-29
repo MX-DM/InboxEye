@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchEmail, fetchEmails, fetchRun, fetchRuns, startRun } from "./api";
 import { Detail } from "./Detail";
 import { Inbox } from "./Inbox";
-import { countByStatus, latestRunByEmail, STATUS_LABEL } from "./lib";
+import { comparisonPair, countByStatus, latestRunByEmail, STATUS_LABEL, statusOf } from "./lib";
 import type { EmailDetail, EmailSummary, ProcessingResult, UiStatus } from "./types";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -59,6 +59,16 @@ export default function App() {
   const latest = useMemo(() => latestRunByEmail(runs), [runs]);
   const counts = useMemo(() => countByStatus(emails.map((e) => e.id), latest), [emails, latest]);
 
+  const waitRun = useCallback(async (runId: string, label: string) => {
+    const deadline = Date.now() + MAX_WAIT_MS;
+    for (;;) {
+      const run = await fetchRun(runId);
+      if (run.status !== "PROCESSING") return;
+      if (Date.now() > deadline) throw new Error(`La corrida de ${label} tardó demasiado.`);
+      await sleep(800);
+    }
+  }, []);
+
   // Secuencial a propósito: de a un correo por vez, para controlar el consumo de la API.
   const process = useCallback(
     async (ids: string[]) => {
@@ -68,13 +78,7 @@ export default function App() {
         for (const id of ids) {
           const runId = await startRun(id);
           await refreshRuns();
-          const deadline = Date.now() + MAX_WAIT_MS;
-          for (;;) {
-            const run = await fetchRun(runId);
-            if (run.status !== "PROCESSING") break;
-            if (Date.now() > deadline) throw new Error(`La corrida de ${id} tardó demasiado.`);
-            await sleep(800);
-          }
+          await waitRun(runId, id);
           await refreshRuns();
         }
       } catch (e) {
@@ -84,9 +88,29 @@ export default function App() {
         await refreshRuns();
       }
     },
-    [refreshRuns],
+    [refreshRuns, waitRun],
   );
 
+  // Comparación: dos corridas reales e independientes del mismo correo (protegida y sin protección).
+  const compare = useCallback(
+    async (id: string) => {
+      setBusy(true);
+      setError(null);
+      try {
+        const [protectedId, unprotectedId] = await Promise.all([startRun(id, "PROTECTED"), startRun(id, "UNPROTECTED_DEMO")]);
+        await refreshRuns();
+        await Promise.all([waitRun(protectedId, id), waitRun(unprotectedId, id)]);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "error al comparar");
+      } finally {
+        setBusy(false);
+        await refreshRuns();
+      }
+    },
+    [refreshRuns, waitRun],
+  );
+
+  const pendingIds = emails.filter((e) => statusOf(e.id, latest) === "PENDING").map((e) => e.id);
   const processSelected = () => void process(emails.filter((e) => checked.has(e.id)).map((e) => e.id));
   const toggle = (id: string) =>
     setChecked((cur) => {
@@ -120,10 +144,12 @@ export default function App() {
           viewedId={viewedId}
           checked={checked}
           busy={busy}
+          pendingCount={pendingIds.length}
           onView={setViewedId}
           onToggle={toggle}
           onToggleAll={(all) => setChecked(all ? new Set(emails.map((e) => e.id)) : new Set())}
           onProcessSelected={processSelected}
+          onProcessPending={() => void process(pendingIds)}
         />
         {viewed ? (
           <Detail
@@ -131,8 +157,10 @@ export default function App() {
             emailId={viewed.id}
             subject={viewed.subject}
             run={latest.get(viewed.id)}
+            pair={comparisonPair(runs, viewed.id)}
             busy={busy}
             onProcess={() => void process([viewed.id])}
+            onCompare={() => void compare(viewed.id)}
           />
         ) : (
           <p className="muted">Elegí un correo de la bandeja.</p>

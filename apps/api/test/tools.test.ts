@@ -69,7 +69,7 @@ describe("tools de NovaShop", () => {
 
   it("getOrderStatus: pedido existente devuelve su estado y no pasa por el inspector", async () => {
     const { agent, llm } = setup([toolUse("getOrderStatus", { orderId: "ORD-1001" }), finalText("ok")]);
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
     expect(lastToolResult(llm).content).toContain("IN_TRANSIT");
     expect(run.events.some((e) => e.eventType === "INSPECTION")).toBe(false);
@@ -77,7 +77,7 @@ describe("tools de NovaShop", () => {
 
   it("getOrderStatus: pedido inexistente es NOT_FOUND, no una denegación", async () => {
     const { agent, llm } = setup([toolUse("getOrderStatus", { orderId: "ORD-9999" }), finalText("ok")]);
-    const { run, done } = agent.start("email-order-not-found");
+    const { run, done } = agent.start("email-005");
     await done;
     expect(lastToolResult(llm).content).toContain("NOT_FOUND");
     expect(lastToolResult(llm).is_error).toBeUndefined();
@@ -86,7 +86,7 @@ describe("tools de NovaShop", () => {
 
   it("readInternalDocument: return-policy permitido", async () => {
     const { agent, llm } = setup([toolUse("readInternalDocument", { documentId: "return-policy" }), finalText("ok")]);
-    const { run, done } = agent.start("email-order-and-return");
+    const { run, done } = agent.start("email-002");
     await done;
     expect(lastToolResult(llm).content).toContain("30 días");
     expect(run.events.find((e) => e.eventType === "POLICY_DECISION")?.decision).toBe("ALLOW");
@@ -98,7 +98,7 @@ describe("tools de NovaShop", () => {
       [toolUse("readInternalDocument", { documentId: "payroll-private" }), finalText("ok")],
       config,
     );
-    const { run, done } = agent.start("email-injection-obvious");
+    const { run, done } = agent.start("email-004");
     await done;
 
     expect(handler).not.toHaveBeenCalled();
@@ -109,16 +109,16 @@ describe("tools de NovaShop", () => {
   });
 
   it("tagEmail: categoría registrada queda en los efectos de la corrida", async () => {
-    const { agent } = setup([toolUse("tagEmail", { emailId: "email-order-status", category: "SUPPORT" }), finalText("ok")]);
-    const { run, done } = agent.start("email-order-status");
+    const { agent } = setup([toolUse("tagEmail", { emailId: "email-001", category: "SUPPORT" }), finalText("ok")]);
+    const { run, done } = agent.start("email-001");
     await done;
-    expect(run.effects.tags).toEqual([{ emailId: "email-order-status", category: "SUPPORT" }]);
+    expect(run.effects.tags).toEqual([{ emailId: "email-001", category: "SUPPORT" }]);
   });
 
   it("tagEmail: categoría no registrada se rechaza sin ejecutar el handler", async () => {
     const { handler, config } = spyOn("tagEmail");
-    const { agent } = setup([toolUse("tagEmail", { emailId: "email-order-status", category: "HACKED" }), finalText("ok")], config);
-    const { run, done } = agent.start("email-order-status");
+    const { agent } = setup([toolUse("tagEmail", { emailId: "email-001", category: "HACKED" }), finalText("ok")], config);
+    const { run, done } = agent.start("email-001");
     await done;
     expect(handler).not.toHaveBeenCalled();
     expect(run.effects.tags).toEqual([]);
@@ -126,11 +126,11 @@ describe("tools de NovaShop", () => {
 
   it("tagEmail / flagForReview sobre OTRO email: DENY y sin efectos", async () => {
     const { agent } = setup([
-      toolUse("tagEmail", { emailId: "email-bank-change", category: "FINANCE" }, "tu_1"),
-      toolUse("flagForReview", { emailId: "email-bank-change", reason: "x" }, "tu_2"),
+      toolUse("tagEmail", { emailId: "email-003", category: "FINANCE" }, "tu_1"),
+      toolUse("flagForReview", { emailId: "email-003", reason: "x" }, "tu_2"),
       finalText("ok"),
     ]);
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
     const denies = run.events.filter((e) => e.decision === "DENY");
     expect(denies.map((e) => e.tool)).toEqual(["tagEmail", "flagForReview"]);
@@ -140,13 +140,13 @@ describe("tools de NovaShop", () => {
 
   it("flagForReview: registra la derivación en los efectos de la corrida", async () => {
     const { agent } = setup([
-      toolUse("flagForReview", { emailId: "email-bank-change", reason: "Solicitud de cambio bancario" }),
+      toolUse("flagForReview", { emailId: "email-003", reason: "Solicitud de cambio bancario" }),
       finalText("ok"),
     ]);
-    const { run, done } = agent.start("email-bank-change");
+    const { run, done } = agent.start("email-003");
     await done;
     expect(run.effects.reviews).toEqual([
-      { emailId: "email-bank-change", reason: "Solicitud de cambio bancario" },
+      { emailId: "email-003", reason: "Solicitud de cambio bancario" },
     ]);
   });
 
@@ -154,9 +154,9 @@ describe("tools de NovaShop", () => {
     const store = new RunStore();
     const mk = (script: LLMResponse[]) =>
       createGuardedAgent({ config: companyConfig, llm: new MockLLM(script), inspector: new StubInspector(), store });
-    const a = mk([toolUse("tagEmail", { emailId: "email-order-status", category: "SUPPORT" }), finalText("ok")]).start("email-order-status");
+    const a = mk([toolUse("tagEmail", { emailId: "email-001", category: "SUPPORT" }), finalText("ok")]).start("email-001");
     await a.done;
-    const b = mk([finalText("ok")]).start("email-order-status");
+    const b = mk([finalText("ok")]).start("email-001");
     await b.done;
     expect(a.run.effects.tags).toHaveLength(1);
     expect(b.run.effects.tags).toHaveLength(0);
@@ -174,8 +174,8 @@ describe("tools de NovaShop", () => {
       await done;
       return run.events.filter((e) => e.eventType === "TOOL_EXECUTED").map((e) => e.tool);
     };
-    expect(await seq("email-order-status", [["getOrderStatus", { orderId: "ORD-1001" }]])).toEqual(["readEmail", "getOrderStatus"]);
-    expect(await seq("email-bank-change", [["flagForReview", { emailId: "email-bank-change", reason: "r" }]])).toEqual(["readEmail", "flagForReview"]);
+    expect(await seq("email-001", [["getOrderStatus", { orderId: "ORD-1001" }]])).toEqual(["readEmail", "getOrderStatus"]);
+    expect(await seq("email-003", [["flagForReview", { emailId: "email-003", reason: "r" }]])).toEqual(["readEmail", "flagForReview"]);
   });
 });
 
@@ -203,11 +203,11 @@ const report = (outcome: string, extra: Record<string, unknown> = {}) =>
 describe("AgentReport y estado final", () => {
   it("pedido encontrado: PROCESSED + INFORMATION_FOUND, informe validado y tolerante a ```json", async () => {
     const { agent } = setup([
-      toolUse("readEmail", { emailId: "email-order-status" }, "t1"),
+      toolUse("readEmail", { emailId: "email-001" }, "t1"),
       toolUse("getOrderStatus", { orderId: "ORD-1001" }, "t2"),
       report("INFORMATION_FOUND"),
     ]);
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
     expect(run.status).toBe("PROCESSED");
     expect(run.agentReport?.outcome).toBe("INFORMATION_FOUND");
@@ -219,7 +219,7 @@ describe("AgentReport y estado final", () => {
       toolUse("getOrderStatus", { orderId: "ORD-9999" }, "t1"),
       report("INFORMATION_UNAVAILABLE"),
     ]);
-    const { run, done } = agent.start("email-order-not-found");
+    const { run, done } = agent.start("email-005");
     await done;
     expect(run.status).toBe("PROCESSED");
     expect(run.agentReport?.outcome).toBe("INFORMATION_UNAVAILABLE");
@@ -230,7 +230,7 @@ describe("AgentReport y estado final", () => {
       toolUse("getOrderStatus", { orderId: "ORD-9999" }, "t1"),
       report("INFORMATION_FOUND"),
     ]);
-    const { run, done } = agent.start("email-order-not-found");
+    const { run, done } = agent.start("email-005");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
     expect(run.agentReport?.outcome).toBe("INFORMATION_FOUND"); // no se altera el informe
@@ -239,10 +239,10 @@ describe("AgentReport y estado final", () => {
 
   it("flagForReview ejecutado: NEEDS_REVIEW y ESCALATED respaldado", async () => {
     const { agent } = setup([
-      toolUse("flagForReview", { emailId: "email-bank-change", reason: "Cambio bancario" }, "t1"),
+      toolUse("flagForReview", { emailId: "email-003", reason: "Cambio bancario" }, "t1"),
       report("ESCALATED", { category: "FINANCE" }),
     ]);
-    const { run, done } = agent.start("email-bank-change");
+    const { run, done } = agent.start("email-003");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
     expect(run.agentReport?.outcome).toBe("ESCALATED");
@@ -251,7 +251,7 @@ describe("AgentReport y estado final", () => {
 
   it("ESCALATED sin flagForReview: NEEDS_REVIEW por discrepancia", async () => {
     const { agent } = setup([report("ESCALATED")]);
-    const { run, done } = agent.start("email-bank-change");
+    const { run, done } = agent.start("email-003");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
     expect(run.events.some((e) => e.eventType === "REPORT_CHECK")).toBe(true);
@@ -262,7 +262,7 @@ describe("AgentReport y estado final", () => {
       toolUse("readInternalDocument", { documentId: "payroll-private" }, "t1"),
       report("NO_ACTION_NEEDED"),
     ]);
-    const { run, done } = agent.start("email-injection-obvious");
+    const { run, done } = agent.start("email-004");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
     expect(toProcessingResult(run).security.deniedActions).toBe(1);
@@ -270,7 +270,7 @@ describe("AgentReport y estado final", () => {
 
   it("informe inválido: reintenta una vez y se recupera", async () => {
     const { agent, llm } = setup([rawText("Listo, todo resuelto."), report("NO_ACTION_NEEDED")]);
-    const { run, done } = agent.start("email-info-general");
+    const { run, done } = agent.start("email-009");
     await done;
     expect(llm.calls).toHaveLength(2);
     expect(JSON.stringify(llm.calls[1]!.messages.at(-1))).toContain("AgentReport JSON válido");
@@ -280,7 +280,7 @@ describe("AgentReport y estado final", () => {
 
   it("informe inválido dos veces: FAILED sin informe", async () => {
     const { agent } = setup([rawText("texto libre"), rawText('{"category":"NOPE"}')]);
-    const { run, done } = agent.start("email-info-general");
+    const { run, done } = agent.start("email-009");
     await done;
     expect(run.status).toBe("FAILED");
     expect(run.failureReason).toBe("invalid agent report");
@@ -297,8 +297,8 @@ describe("AgentReport y estado final", () => {
 
 describe("ProcessingResult y API", () => {
   it("toProcessingResult: contrato completo; el stub no se presenta como LOW", async () => {
-    const { agent } = setup([toolUse("readEmail", { emailId: "email-info-general" }, "t1"), report("NO_ACTION_NEEDED")]);
-    const { run, done } = agent.start("email-info-general");
+    const { agent } = setup([toolUse("readEmail", { emailId: "email-009" }, "t1"), report("NO_ACTION_NEEDED")]);
+    const { run, done } = agent.start("email-009");
     await done;
     const r = toProcessingResult(run);
     expect(Object.keys(r).sort()).toEqual(
@@ -319,11 +319,11 @@ describe("ProcessingResult y API", () => {
       expect(emails.every((e) => !("textBody" in e) && !("body" in e))).toBe(true);
 
       // Detalle para la consola del operador: sí incluye el cuerpo; un ID inexistente da 404.
-      const detail = (await (await fetch(`${base}/emails/email-injection-obvious`)).json()) as { body: string };
+      const detail = (await (await fetch(`${base}/emails/email-004`)).json()) as { body: string };
       expect(detail.body).toContain("ATENCIÓN AGENTE");
       expect((await fetch(`${base}/emails/no-existe`)).status).toBe(404);
 
-      const { run, done } = agent.start("email-info-general");
+      const { run, done } = agent.start("email-009");
       await done;
       const got = (await (await fetch(`${base}/runs/${run.id}`)).json()) as { status: string; agentReport: unknown; security: unknown };
       expect(got.status).toBe("PROCESSED");

@@ -11,13 +11,27 @@ interface Props {
   viewedId: string | null;
   checked: Set<string>;
   busy: boolean;
+  pendingCount: number;
   onView: (id: string) => void;
   onToggle: (id: string) => void;
   onToggleAll: (all: boolean) => void;
   onProcessSelected: () => void;
+  onProcessPending: () => void;
 }
 
-export function Inbox({ emails, latest, viewedId, checked, busy, onView, onToggle, onToggleAll, onProcessSelected }: Props) {
+export function Inbox({
+  emails,
+  latest,
+  viewedId,
+  checked,
+  busy,
+  pendingCount,
+  onView,
+  onToggle,
+  onToggleAll,
+  onProcessSelected,
+  onProcessPending,
+}: Props) {
   const allChecked = emails.length > 0 && emails.every((e) => checked.has(e.id));
   return (
     <section className="panel inbox">
@@ -26,9 +40,14 @@ export function Inbox({ emails, latest, viewedId, checked, busy, onView, onToggl
           <input type="checkbox" checked={allChecked} onChange={(e) => onToggleAll(e.target.checked)} disabled={busy} />
           Todos
         </label>
-        <button className="primary" onClick={onProcessSelected} disabled={busy || checked.size === 0}>
-          {busy ? "Procesando…" : `Procesar seleccionados (${checked.size})`}
-        </button>
+        <div className="inbox-actions">
+          <button className="primary" onClick={onProcessSelected} disabled={busy || checked.size === 0}>
+            {busy ? "Procesando…" : `Procesar seleccionados (${checked.size})`}
+          </button>
+          <button onClick={onProcessPending} disabled={busy || pendingCount === 0} title="Procesa de a uno los correos que todavía no tienen corrida">
+            Procesar pendientes ({pendingCount})
+          </button>
+        </div>
       </div>
       <ul className="email-list">
         {emails.map((e) => (

@@ -62,10 +62,10 @@ function setup(script: LLMResponse[], opts: { inspector?: ContentInspector; conf
 describe("AgentRunner", () => {
   it("camino feliz: el agente elige readEmail, recibe el contenido y termina", async () => {
     const { agent, llm } = setup([
-      toolUse("readEmail", { emailId: "email-order-status" }),
+      toolUse("readEmail", { emailId: "email-001" }),
       finalText("Informativo, prioridad baja."),
     ]);
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
 
     expect(run.status).toBe("PROCESSED");
@@ -77,6 +77,7 @@ describe("AgentRunner", () => {
       "POLICY_DECISION",
       "TOOL_EXECUTED",
       "INSPECTION",
+      "CONTENT_DELIVERED",
       "LLM_CALL",
       "RUN_FINISHED",
     ]);
@@ -88,9 +89,9 @@ describe("AgentRunner", () => {
 
   it("el primer mensaje al LLM contiene el ID pero NO el cuerpo del correo", async () => {
     const { agent, llm } = setup([finalText("sin tools")]);
-    await agent.start("email-order-status").done;
+    await agent.start("email-001").done;
     const first = JSON.stringify(llm.calls[0]!.messages);
-    expect(first).toContain("email-order-status");
+    expect(first).toContain("email-001");
     for (const e of EMAILS) {
       expect(first).not.toContain(e.textBody);
       expect(first).not.toContain(e.subject);
@@ -99,7 +100,7 @@ describe("AgentRunner", () => {
 
   it("herramienta desconocida: DENY, no se ejecuta y se devuelve tool_result de error", async () => {
     const { agent, llm } = setup([toolUse("executeShell", { cmd: "rm -rf /" }), finalText("ok")]);
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
 
     // Tool inexistente: se deniega y audita, pero no es un incidente de recurso que cambie el estado.
@@ -113,10 +114,10 @@ describe("AgentRunner", () => {
   it("readEmail de OTRO email: DENY y el handler nunca se ejecuta", async () => {
     const handler = vi.fn(async () => ({}));
     const spyTool: ToolDef = { ...(companyConfig.tools[0] as ToolDef), handler };
-    const { agent } = setup([toolUse("readEmail", { emailId: "email-order-and-return" }), finalText("ok")], {
+    const { agent } = setup([toolUse("readEmail", { emailId: "email-002" }), finalText("ok")], {
       config: { ...companyConfig, tools: [spyTool] },
     });
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
 
     expect(handler).not.toHaveBeenCalled();
@@ -130,19 +131,19 @@ describe("AgentRunner", () => {
     const { agent } = setup([toolUse("readEmail", { emailId: 42 }), finalText("ok")], {
       config: { ...companyConfig, tools: [spyTool] },
     });
-    const { done } = agent.start("email-order-status");
+    const { done } = agent.start("email-001");
     await done;
     expect(handler).not.toHaveBeenCalled();
   });
 
   it("MAX_TOOL_STEPS: termina FAILED sin bucle infinito", async () => {
     const script = Array.from({ length: 10 }, (_, i) =>
-      toolUse("readEmail", { emailId: "email-order-status" }, `tu_${i}`),
+      toolUse("readEmail", { emailId: "email-001" }, `tu_${i}`),
     );
     const { agent, llm } = setup(script, {
       config: { ...companyConfig, limits: { maxToolSteps: 3 } },
     });
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await done;
     expect(run.status).toBe("FAILED");
     expect(llm.calls).toHaveLength(3);
@@ -157,7 +158,7 @@ describe("AgentRunner", () => {
 
   it("HIGH: el inspector corre ANTES del tool_result, retiene el contenido y el run termina sin otra llamada al agente", async () => {
     const order: string[] = [];
-    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-injection-obvious" }), finalText("no debería llamarse")]);
+    const llm = new MockLLM([toolUse("readEmail", { emailId: "email-004" }), finalText("no debería llamarse")]);
     const origComplete = llm.complete.bind(llm);
     llm.complete = async (req) => {
       order.push("llm");
@@ -165,7 +166,7 @@ describe("AgentRunner", () => {
     };
     const store = new RunStore();
     const agent = createGuardedAgent({ config: companyConfig, llm, inspector: fixedInspector("HIGH", order), store });
-    const { run, done } = agent.start("email-injection-obvious");
+    const { run, done } = agent.start("email-004");
     await done;
 
     expect(order).toEqual(["llm", "inspect"]);
@@ -177,13 +178,13 @@ describe("AgentRunner", () => {
   });
 
   it("MEDIUM: retiene el contenido y deriva a NEEDS_REVIEW con motivo fijo", async () => {
-    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-injection-subtle" }), finalText("x")], {
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-011" }), finalText("x")], {
       inspector: fixedInspector("MEDIUM"),
     });
-    const { run, done } = agent.start("email-injection-subtle");
+    const { run, done } = agent.start("email-011");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
-    expect(run.effects.reviews).toEqual([{ emailId: "email-injection-subtle", reason: "Input Guard: riesgo MEDIUM" }]);
+    expect(run.effects.reviews).toEqual([{ emailId: "email-011", reason: "Input Guard: riesgo MEDIUM" }]);
     expect(llm.calls).toHaveLength(1);
     expect(JSON.stringify(llm.calls)).not.toContain("nómina");
   });
@@ -194,8 +195,8 @@ describe("AgentRunner", () => {
         throw new Error("boom");
       },
     };
-    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-order-status" }), finalText("x")], { inspector });
-    const { run, done } = agent.start("email-order-status");
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-001" }), finalText("x")], { inspector });
+    const { run, done } = agent.start("email-001");
     await done;
     expect(run.status).toBe("NEEDS_REVIEW");
     expect(toProcessingResult(run).security.risk).toBe("UNKNOWN");
@@ -206,14 +207,14 @@ describe("AgentRunner", () => {
   it("tras retener el contenido no se ejecuta ninguna otra tool del mismo turno", async () => {
     const twoTools: LLMResponse = {
       content: [
-        { type: "tool_use", id: "tu_a", name: "readEmail", input: { emailId: "email-injection-obvious" } },
-        { type: "tool_use", id: "tu_b", name: "tagEmail", input: { emailId: "email-injection-obvious", category: "GENERAL" } },
+        { type: "tool_use", id: "tu_a", name: "readEmail", input: { emailId: "email-004" } },
+        { type: "tool_use", id: "tu_b", name: "tagEmail", input: { emailId: "email-004", category: "GENERAL" } },
       ] as never,
       stopReason: "tool_use",
       usage,
     };
     const { agent } = setup([twoTools], { inspector: fixedInspector("HIGH") });
-    const { run, done } = agent.start("email-injection-obvious");
+    const { run, done } = agent.start("email-004");
     await done;
     expect(run.status).toBe("QUARANTINED");
     expect(run.effects.tags).toEqual([]);
@@ -227,10 +228,10 @@ describe("AgentRunner", () => {
       findings: [],
       suggestedNextStep: "Ninguno.",
     });
-    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-info-general" }), finalText(report)], {
+    const { agent, llm } = setup([toolUse("readEmail", { emailId: "email-009" }), finalText(report)], {
       inspector: fixedInspector("LOW"),
     });
-    const { run, done } = agent.start("email-info-general");
+    const { run, done } = agent.start("email-009");
     await done;
     expect(run.status).toBe("PROCESSED");
     expect(JSON.stringify(llm.calls[1]!.messages)).toContain("trust=");
@@ -240,7 +241,7 @@ describe("AgentRunner", () => {
 
   it("error del LLM: la corrida termina FAILED y no rechaza la promesa", async () => {
     const { agent } = setup([]); // script vacío -> el mock lanza
-    const { run, done } = agent.start("email-order-status");
+    const { run, done } = agent.start("email-001");
     await expect(done).resolves.toBeUndefined();
     expect(run.status).toBe("FAILED");
   });
@@ -262,7 +263,7 @@ describe("HTTP", () => {
       expect((await post({ emailId: "../etc/passwd" })).status).toBe(400);
       expect((await post({})).status).toBe(400);
       expect((await post({ emailId: "no-existe" })).status).toBe(404);
-      const ok = await post({ emailId: "email-order-status" });
+      const ok = await post({ emailId: "email-001" });
       expect(ok.status).toBe(202);
       expect(z.object({ runId: z.string() }).safeParse(await ok.json()).success).toBe(true);
     } finally {

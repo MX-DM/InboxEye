@@ -15,13 +15,15 @@ export interface LLMResponse {
 
 /** Única interfaz hacia el modelo: la usan el agente y, luego, el analyzer. Permite mockear en tests. */
 export interface LLMClient {
+  /** Identificador del modelo, para auditar que las corridas comparadas usan el mismo. */
+  readonly model?: string;
   complete(req: LLMRequest): Promise<LLMResponse>;
 }
 
 export class AnthropicClient implements LLMClient {
   private client: Anthropic;
 
-  constructor(private model: string, apiKey?: string) {
+  constructor(readonly model: string, apiKey?: string) {
     // La clave se lee del entorno del backend; nunca se registra.
     this.client = new Anthropic({ apiKey, maxRetries: 2 });
   }

@@ -1,4 +1,4 @@
-import type { EmailDetail, EmailSummary, ProcessingResult } from "./types";
+import type { EmailDetail, EmailSummary, ProcessingResult, RunMode } from "./types";
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`/api${path}`);
@@ -11,12 +11,13 @@ export const fetchEmail = (id: string) => get<EmailDetail>(`/emails/${encodeURIC
 export const fetchRuns = () => get<ProcessingResult[]>("/runs");
 export const fetchRun = (id: string) => get<ProcessingResult>(`/runs/${encodeURIComponent(id)}`);
 
-export async function startRun(emailId: string): Promise<string> {
+export async function startRun(emailId: string, mode: RunMode = "PROTECTED"): Promise<string> {
   const res = await fetch("/api/runs", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ emailId }),
+    body: JSON.stringify({ emailId, mode }),
   });
   if (!res.ok) throw new Error(`POST /runs → ${res.status}`);
   return ((await res.json()) as { runId: string }).runId;
 }
+

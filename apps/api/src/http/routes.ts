@@ -5,7 +5,10 @@ import type { createGuardedAgent } from "../core/AgentRunner.js";
 import type { RunStore } from "../core/RunStore.js";
 import { toProcessingResult } from "../core/result.js";
 
-const StartRunBody = z.object({ emailId: z.string().regex(/^[a-z0-9-]{1,40}$/) });
+const StartRunBody = z.object({
+  emailId: z.string().regex(/^[a-z0-9-]{1,40}$/),
+  mode: z.enum(["PROTECTED", "UNPROTECTED_DEMO"]).default("PROTECTED"),
+});
 
 export function createApp(agent: ReturnType<typeof createGuardedAgent>, store: RunStore) {
   const app = express();
@@ -13,9 +16,9 @@ export function createApp(agent: ReturnType<typeof createGuardedAgent>, store: R
 
   app.post("/runs", (req, res) => {
     const body = StartRunBody.safeParse(req.body);
-    if (!body.success) return res.status(400).json({ error: "invalid emailId" });
+    if (!body.success) return res.status(400).json({ error: "invalid emailId or mode" });
     if (!findEmail(body.data.emailId)) return res.status(404).json({ error: "email not found" });
-    const { run } = agent.start(body.data.emailId);
+    const { run } = agent.start(body.data.emailId, body.data.mode);
     res.status(202).json({ runId: run.id });
   });
 

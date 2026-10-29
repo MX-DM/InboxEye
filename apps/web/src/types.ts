@@ -1,5 +1,6 @@
 // Espejo mínimo del contrato de la API (apps/api/src/core/types.ts). Se duplica a propósito: sin paquete compartido.
-export type RunStatus = "PROCESSING" | "PROCESSED" | "NEEDS_REVIEW" | "QUARANTINED" | "FAILED";
+export type RunMode = "PROTECTED" | "UNPROTECTED_DEMO";
+export type RunStatus ="PROCESSING" | "PROCESSED" | "NEEDS_REVIEW" | "QUARANTINED" | "FAILED";
 /** Estado que muestra la bandeja: un correo sin corridas está PENDING. */
 export type UiStatus = "PENDING" | RunStatus;
 export type Risk = "LOW" | "MEDIUM" | "HIGH" | "UNKNOWN" | "NOT_ANALYZED";
@@ -26,7 +27,7 @@ export interface RunEvent {
 export interface ProcessingResult {
   runId: string;
   emailId: string;
-  mode: string;
+  mode: RunMode;
   status: RunStatus;
   agentReport: AgentReport | null;
   security: { risk: Risk; reason?: string; signals: string[]; deniedActions: number };
@@ -42,3 +43,4 @@ export interface EmailSummary {
 export interface EmailDetail extends EmailSummary {
   body: string;
 }
+
