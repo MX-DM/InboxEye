@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>InboxEye — Recorded Executions</title>
+<style>
+:root{color-scheme:dark;--bg:#07141e;--panel:#0e2330;--line:#284455;--text:#eef7fc;--muted:#aac1cf;--mint:#50d4af;--cyan:#54adff;--red:#f17f87;--purple:#ad99f9;--amber:#ffcd72}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--text);font:15px/1.48 system-ui,Segoe UI,Arial,sans-serif;margin:0}
+header{padding:16px 26px;background:#0e2330;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:20px}
+h1{margin:0;font-size:23px}main{max-width:1450px;margin:24px auto;padding:0 24px;display:grid;grid-template-columns:minmax(270px,340px) minmax(0,1fr);gap:22px}
+.meta{font-size:12px;color:var(--muted);letter-spacing:.05em}h2{font-size:19px}h3{font-size:16px}p{margin:.4em 0}.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:18px}
+input[type=file]{max-width:250px}button{background:#133043;border:1px solid var(--line);color:var(--text);padding:12px;text-align:left;cursor:pointer;border-radius:10px;display:block;width:100%;margin:8px 0;font:inherit}
+button:hover,button.active{border-color:var(--cyan);background:#193a50}button .sub{display:block;color:var(--muted);font-size:12px}.pill{display:inline-block;padding:3px 9px;border-radius:15px;background:#234354;color:var(--cyan);font-size:12px;font-weight:700;margin:2px 5px 2px 0}
+.ok{color:var(--mint)}.warn{color:var(--amber)}.no{color:var(--red)}.trace{border-left:2px solid #24546b;padding-left:18px;margin:12px 0 0 8px}
+.ev{padding:9px 0 11px 13px;border-bottom:1px solid #203847;position:relative;word-break:break-word}.ev:before{content:'';position:absolute;left:-24px;top:17px;background:var(--cyan);height:9px;width:9px;border-radius:50%}
+.ev small{color:var(--muted);display:block}.event-head{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline}.event-head strong{color:#d7e8f5}.kv{display:flex;flex-wrap:wrap;gap:8px}.kv span{background:#19394b;padding:5px 9px;border-radius:8px}ul{padding-left:20px}.muted{color:var(--muted)}.empty{padding:32px;text-align:center}.notice{background:#1c2f41;border:1px solid #3b5a70;border-radius:10px;padding:12px 15px}
+@media(max-width:870px){main{display:block}header{display:block}header input{margin-top:9px}}
+</style>
+</head>
+<body>
+<header><div><h1>◈ InboxEye <span style="color:var(--mint)">/ Recorded Executions</span></h1><div class="meta">Visor LOCAL, SIN API y SIN herramientas · Datos de prueba sintéticos</div></div><label class="meta">Abrir archivo exportado (.json)<br><input id="file" type="file" accept=".json,application/json"></label></header>
+<main><section><div class="card"><h2>Corridas guardadas</h2><p class="muted">Seleccioná una corrida para examinar el resultado real que se registró anteriormente.</p><div id="runs"><div class="empty muted">Primero cargá un JSON exportado.</div></div></div></section><section id="detail"><div class="card empty"><h2>Respaldo offline</h2><p class="muted">Esto muestra registros previos. No genera respuestas nuevas ni simula una ejecución en vivo.</p></div></section></main>
+<script>
+let runs=[];let selected=0;
+const esc=(x)=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// Admite el formato normal [run, ...] y el envoltorio generado por PowerShell
+// [{value:[run,...], Count:N}], sin alterar los eventos guardados.
+function normalizeRuns(data){
+  if(Array.isArray(data)&&data.length===1&&data[0]&&Array.isArray(data[0].value)) return data[0].value;
+  if(data&&typeof data==='object'&&!Array.isArray(data)&&Array.isArray(data.value)) return data.value;
+  if(data&&typeof data==='object'&&!Array.isArray(data)&&Array.isArray(data.runs)) return data.runs;
+  if(Array.isArray(data)) return data;
+  throw new Error('Formato no reconocido: se esperaba una lista de ejecuciones');
+}
+const st=(s)=>({PROCESSED:'ok',QUARANTINED:'no',FAILED:'no',NEEDS_REVIEW:'warn'}[s]||'');
+document.querySelector('#file').addEventListener('change',async e=>{
+ const f=e.target.files?.[0];if(!f)return;
+ try{
+   const data=JSON.parse((await f.text()).replace(/^\uFEFF/,''));
+   runs=normalizeRuns(data).filter(x=>x&&typeof x==='object'&&typeof x.runId==='string'&&Array.isArray(x.events));
+   if(!runs.length)throw new Error('No se encontraron ProcessingResult con eventos');
+   selected=0;render();
+ }catch(err){alert('No se pudo abrir el archivo: '+err.message)}
+});
+function render(){
+ document.querySelector('#runs').innerHTML=runs.map((r,i)=>`<button class="${i===selected?'active':''}" data-i="${i}"><strong>${esc(r.emailId)} · ${esc(r.mode)}</strong><span class="sub">${esc(r.status)} · ${r.events.length} eventos · ${esc(r.runId.slice(0,8))}</span></button>`).join('');
+ document.querySelectorAll('[data-i]').forEach(b=>b.onclick=()=>{selected=+b.dataset.i;render()});
+ const r=runs[selected],sec=r.security||{},report=r.agentReport;
+ const ev=(r.events||[]).map(e=>{
+   let detail=e.detail?JSON.stringify(e.detail):'';
+   return `<div class="ev"><div class="event-head"><strong>${esc(e.eventType)}</strong><small>${esc(e.tool||'')} ${esc(e.decision||'')}</small></div><small>${esc(e.ts||'')}</small><div>${esc(e.reason||'')}</div><small>${esc(detail)}</small></div>`;
+ }).join('');
+ document.querySelector('#detail').innerHTML=`<div class="notice"><strong>GRABACIÓN PREVIA · NO ES LIVE</strong><br><span class="muted">Se muestran eventos reales exportados de una ejecución anterior; no se consultó a Claude para abrirla.</span></div>
+ <div class="card"><div class="meta">${esc(r.runId)} · ${esc(r.mode)}</div><h2>${esc(r.emailId)} · <span class="${st(r.status)}">${esc(r.status)}</span></h2>
+ <div class="kv"><span>Riesgo: ${esc(sec.risk||'N/A')}</span><span>Acciones denegadas: ${esc(sec.deniedActions??0)}</span><span>${r.events.length} eventos</span></div>
+ <p class="muted">${esc(sec.reason||'')}</p>${sec.signals?.length?`<p>${sec.signals.map(s=>`<span class="pill">${esc(s)}</span>`).join('')}</p>`:''}</div>
+ <div class="card"><h3>Informe del agente</h3>${report?`<span class="pill">${esc(report.category)}</span><span class="pill">${esc(report.outcome)}</span><p>${esc(report.summary)}</p><ul>${(report.findings||[]).map(f=>`<li>${esc(f)}</li>`).join('')}</ul><p><strong>Siguiente paso:</strong> ${esc(report.suggestedNextStep)}</p>`:'<p class="muted">No hubo informe (por ejemplo, cuarentena o error).</p>'}</div>
+ <div class="card"><h3>Traza de ejecución</h3><div class="trace">${ev}</div></div>`;
+}
+</script>
+</body>
+</html>
